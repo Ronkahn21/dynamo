@@ -1,0 +1,99 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package v1alpha1
+
+import (
+	"reflect"
+	"testing"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+)
+
+// TestSchemeRegistersSnapshotKinds verifies the init() registrations expose all
+// four new kinds through the package AddToScheme.
+func TestSchemeRegistersSnapshotKinds(t *testing.T) {
+	scheme := runtime.NewScheme()
+	if err := AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme failed: %v", err)
+	}
+	for _, kind := range []string{"Snapshot", "SnapshotList", "SnapshotContent", "SnapshotContentList"} {
+		if !scheme.Recognizes(GroupVersion.WithKind(kind)) {
+			t.Errorf("scheme does not recognize kind %q in %s", kind, GroupVersion.String())
+		}
+	}
+}
+
+// TestSnapshotDeepCopyIsIndependent verifies the generated deepcopy produces an
+// equal but independent Snapshot (mutating the clone must not touch the source).
+func TestSnapshotDeepCopyIsIndependent(t *testing.T) {
+	original := &Snapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: "snap-a", Namespace: "inference"},
+		Spec: SnapshotSpec{
+			CheckpointID: "abc123",
+			Source:       SnapshotSource{PodRef: PodReference{Name: "worker-0"}},
+		},
+		Status: SnapshotStatus{
+			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Captured"}},
+		},
+	}
+
+	clone := original.DeepCopy()
+	if !reflect.DeepEqual(original, clone) {
+		t.Fatalf("DeepCopy is not equal to original")
+	}
+
+	clone.Spec.CheckpointID = "mutated"
+	clone.Status.Conditions[0].Reason = "Changed"
+	if original.Spec.CheckpointID != "abc123" {
+		t.Errorf("mutating clone spec changed original: got %q", original.Spec.CheckpointID)
+	}
+	if original.Status.Conditions[0].Reason != "Captured" {
+		t.Errorf("mutating clone condition changed original: got %q", original.Status.Conditions[0].Reason)
+	}
+}
+
+// TestSnapshotContentDeepCopyIsIndependent verifies the generated deepcopy for
+// the cluster-scoped SnapshotContent is equal but independent.
+func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
+	original := &SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "content-a"},
+		Spec: SnapshotContentSpec{
+			SnapshotRef: SnapshotReference{Namespace: "inference", Name: "snap-a", UID: types.UID("uid-1")},
+			Source:      SnapshotContentSource{SnapshotHandle: "pvc://inference/ckpt-pvc/checkpoints/abc123/versions/1"},
+		},
+		Status: SnapshotContentStatus{
+			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Bound"}},
+		},
+	}
+
+	clone := original.DeepCopy()
+	if !reflect.DeepEqual(original, clone) {
+		t.Fatalf("DeepCopy is not equal to original")
+	}
+
+	clone.Spec.Source.SnapshotHandle = "mutated"
+	clone.Status.Conditions[0].Reason = "Changed"
+	if original.Spec.Source.SnapshotHandle != "pvc://inference/ckpt-pvc/checkpoints/abc123/versions/1" {
+		t.Errorf("mutating clone changed original handle: got %q", original.Spec.Source.SnapshotHandle)
+	}
+	if original.Status.Conditions[0].Reason != "Bound" {
+		t.Errorf("mutating clone condition changed original: got %q", original.Status.Conditions[0].Reason)
+	}
+}
