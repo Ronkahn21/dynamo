@@ -330,6 +330,7 @@ rules:
   - dynamographdeploymentscalingadapters
   - dynamomodels
   - dynamoworkermetadatas
+  - snapshots
   verbs:
   - create
   - delete

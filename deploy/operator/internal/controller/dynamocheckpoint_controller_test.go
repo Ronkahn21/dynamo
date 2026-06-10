@@ -734,7 +734,7 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 			BasePath: "/checkpoints",
 		})
 		require.NoError(t, err)
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		r.Config = cfg
 
 		err = r.FinalizeResource(ctx, ckpt)
@@ -759,7 +759,7 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 			Status:  corev1.ConditionTrue,
 			Message: "boom",
 		}}
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		r.Config = cfg
 
 		err = r.FinalizeResource(ctx, ckpt)
@@ -786,7 +786,7 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 			Type:   batchv1.JobComplete,
 			Status: corev1.ConditionTrue,
 		}}
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		r.Config = cfg
 
 		require.NoError(t, r.FinalizeResource(ctx, ckpt))
@@ -806,10 +806,45 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		if name != "" {
 			ckpt.Name = name
 		}
+		ckpt.UID = types.UID("ckpt-uid") // required for Snapshot ownership
 		ckpt.Status.IdentityHash = testHash
 		ckpt.Status.JobName = jobName
 		return ckpt
 	}
+
+	t.Run("waits without creating a Snapshot until the source pod exists", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, "job-no-pod")
+		job := &batchv1.Job{ObjectMeta: metav1.ObjectMeta{Name: "job-no-pod", Namespace: testNamespace}}
+
+		r := makeCheckpointReconciler(s, ckpt, job) // no Job-owned pod yet
+		result, err := r.handleCreating(ctx, ckpt)
+		require.NoError(t, err)
+		assert.Equal(t, time.Second, result.RequeueAfter)
+
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseCreating, updated.Status.Phase)
+
+		var snaps nvidiacomv1alpha1.SnapshotList
+		require.NoError(t, r.List(ctx, &snaps, client.InNamespace(testNamespace)))
+		assert.Empty(t, snaps.Items)
+	})
+
+	t.Run("creates the Snapshot once the source pod exists", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
+		job := newCheckpointJob(defaultCheckpointJobName)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod("worker-0", job))
+
+		_, err := r.handleCreating(ctx, ckpt)
+		require.NoError(t, err)
+
+		snap := &nvidiacomv1alpha1.Snapshot{}
+		require.NoError(t, r.Get(ctx,
+			types.NamespacedName{Name: snapshotName(testHash), Namespace: testNamespace}, snap))
+		assert.Equal(t, testHash, snap.Spec.CheckpointID)
+		assert.Equal(t, "worker-0", snap.Spec.Source.PodRef.Name)
+		assert.True(t, metav1.IsControlledBy(snap, ckpt))
+	})
 
 	t.Run("succeeded job transitions to Ready", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
@@ -827,7 +862,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -846,7 +881,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -870,7 +905,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		}
 		lease := makeCheckpointLease("job-missing-status-active-lease", time.Now(), 30)
 
-		r := makeCheckpointReconciler(s, ckpt, job, lease)
+		r := makeCheckpointReconciler(s, ckpt, job, lease, newOwnedPod(job.Name+"-pod", job))
 		result, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 		assert.Equal(t, time.Second, result.RequeueAfter)
@@ -893,7 +928,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 				},
 			},
 		}
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -919,7 +954,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -940,7 +975,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			Status: batchv1.JobStatus{Active: 1},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -957,7 +992,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			Status:     batchv1.JobStatus{Active: 1},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -983,7 +1018,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -999,7 +1034,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			Status:     batchv1.JobStatus{Succeeded: 1},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job)
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
