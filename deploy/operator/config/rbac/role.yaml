@@ -227,6 +227,7 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - snapshots
   verbs:
   - create
   - delete
