@@ -47,10 +47,6 @@ func (r *CheckpointReconciler) findSourcePod(ctx context.Context, job *batchv1.J
 // ensureSnapshot creates this checkpoint's Snapshot (owned by ckpt) via Server-Side Apply
 // when absent, and is a no-op when it already exists and is ours. Errors propagate to the caller.
 func (r *CheckpointReconciler) ensureSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, sourcePodName string) error {
-	if ckpt.UID == "" {
-		// An empty owner UID would match any unowned Snapshot in the ownership check.
-		return fmt.Errorf("checkpoint %q has no UID; refusing to create an unowned Snapshot", ckpt.Name)
-	}
 	name := snapshotName(checkpointID)
 
 	existing := &nvidiacomv1alpha1.Snapshot{}
@@ -59,13 +55,15 @@ func (r *CheckpointReconciler) ensureSnapshot(ctx context.Context, ckpt *nvidiac
 		if metav1.IsControlledBy(existing, ckpt) {
 			return nil
 		}
-		// Forbidden is terminal in failOrRequeueSnapshot: a foreign-owned name collision
-		// will not resolve on retry.
-		return apierrors.NewForbidden(
+		// Forbidden is terminal (see controller_common.IgnoreIntermediateError): a
+		// foreign-owned name collision will not resolve on retry.
+		conflict := apierrors.NewForbidden(
 			nvidiacomv1alpha1.GroupVersion.WithResource("snapshots").GroupResource(),
 			name,
 			fmt.Errorf("exists but is not owned by checkpoint %q", ckpt.Name),
 		)
+		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "SnapshotCreateFailed", conflict.Error())
+		return conflict
 	}
 	if client.IgnoreNotFound(err) != nil {
 		return err
@@ -93,26 +91,20 @@ func (r *CheckpointReconciler) ensureSnapshot(ctx context.Context, ckpt *nvidiac
 	}
 	if err := r.Patch(ctx, snap, client.Apply,
 		client.FieldOwner(checkpointSnapshotFieldManager), client.ForceOwnership); err != nil {
+		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "SnapshotCreateFailed", err.Error())
 		return err
 	}
 	r.Recorder.Eventf(ckpt, corev1.EventTypeNormal, "SnapshotCreated", "Created Snapshot %s", name)
 	return nil
 }
 
-// failOrRequeueSnapshot fails the capture on a terminal error, or returns the error to
-// requeue on a transient one.
-func (r *CheckpointReconciler) failOrRequeueSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, err error) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) || apierrors.IsForbidden(err) {
-		logger.Error(err, "Snapshot creation failed terminally; failing checkpoint")
-		ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
-		ckpt.Status.Message = fmt.Sprintf("snapshot creation failed: %v", err)
-		// The Job was created; only the Snapshot failed — leave the JobCreated condition.
-		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "SnapshotCreateFailed", err.Error())
-		if uerr := r.Status().Update(ctx, ckpt); uerr != nil {
-			return ctrl.Result{}, uerr
-		}
-		return ctrl.Result{}, nil
+// updateFailedStatus marks the checkpoint Failed after a terminal Snapshot error. The failure
+// event is emitted at the point of failure in ensureSnapshot; this records status only and does
+// not stomp the JobCreated condition (the Job was created; only the Snapshot failed).
+func (r *CheckpointReconciler) updateFailedStatus(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, err error) {
+	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
+	ckpt.Status.Message = fmt.Sprintf("snapshot creation failed: %v", err)
+	if uerr := r.Status().Update(ctx, ckpt); uerr != nil {
+		log.FromContext(ctx).Error(uerr, "failed to update DynamoCheckpoint status after snapshot failure")
 	}
-	return ctrl.Result{}, err
 }

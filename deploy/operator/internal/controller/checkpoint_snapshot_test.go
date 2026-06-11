@@ -28,7 +28,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -38,6 +37,11 @@ func newCheckpointJob(name string) *batchv1.Job {
 	return &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace, UID: types.UID("job-uid")},
 	}
+}
+
+// podNameFromJob derives the test source-pod name for a checkpoint Job.
+func podNameFromJob(jobName string) string {
+	return jobName + "-pod"
 }
 
 func newOwnedPod(podName string, job *batchv1.Job) *corev1.Pod {
@@ -135,30 +139,15 @@ func TestEnsureSnapshot_ErrorsWhenNotOwned(t *testing.T) {
 	err := r.ensureSnapshot(context.Background(), ckpt, testHash, "worker-xyz")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not owned by checkpoint")
-	// Must be terminal so failOrRequeueSnapshot fails the capture (no infinite requeue).
+	// Must be terminal (Forbidden) so the capture fails instead of requeuing forever.
 	assert.True(t, apierrors.IsForbidden(err))
 }
 
-func TestFailOrRequeueSnapshot_TerminalFailsCheckpoint(t *testing.T) {
+func TestUpdateFailedStatus_MarksCheckpointFailed(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
 	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt)
 
-	terminal := apierrors.NewInvalid(
-		schema.GroupKind{Group: "nvidia.com", Kind: "Snapshot"}, "snapshot-x", nil)
-	res, err := r.failOrRequeueSnapshot(context.Background(), ckpt, terminal)
-	require.NoError(t, err)
-	assert.Zero(t, res.RequeueAfter)
+	r.updateFailedStatus(context.Background(), ckpt, assert.AnError)
 	assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, ckpt.Status.Phase)
 	assert.Contains(t, ckpt.Status.Message, "snapshot creation failed")
-}
-
-func TestFailOrRequeueSnapshot_TransientRequeues(t *testing.T) {
-	ckpt := newOwnedCheckpoint()
-	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt)
-
-	transient := apierrors.NewConflict(
-		schema.GroupResource{Group: "nvidia.com", Resource: "snapshots"}, "snapshot-x", assert.AnError)
-	_, err := r.failOrRequeueSnapshot(context.Background(), ckpt, transient)
-	require.Error(t, err) // returned for requeue/backoff
-	assert.NotEqual(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, ckpt.Status.Phase)
 }

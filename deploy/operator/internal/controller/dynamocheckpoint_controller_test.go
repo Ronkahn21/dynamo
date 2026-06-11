@@ -734,7 +734,7 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 			BasePath: "/checkpoints",
 		})
 		require.NoError(t, err)
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		r.Config = cfg
 
 		err = r.FinalizeResource(ctx, ckpt)
@@ -759,7 +759,7 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 			Status:  corev1.ConditionTrue,
 			Message: "boom",
 		}}
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		r.Config = cfg
 
 		err = r.FinalizeResource(ctx, ckpt)
@@ -786,7 +786,7 @@ func TestCheckpointReconciler_FinalizeResourceCleansRetainedAutoCheckpointOnCRDe
 			Type:   batchv1.JobComplete,
 			Status: corev1.ConditionTrue,
 		}}
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		r.Config = cfg
 
 		require.NoError(t, r.FinalizeResource(ctx, ckpt))
@@ -862,7 +862,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -881,7 +881,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -905,7 +905,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		}
 		lease := makeCheckpointLease("job-missing-status-active-lease", time.Now(), 30)
 
-		r := makeCheckpointReconciler(s, ckpt, job, lease, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, lease, newOwnedPod(podNameFromJob(job.Name), job))
 		result, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 		assert.Equal(t, time.Second, result.RequeueAfter)
@@ -928,7 +928,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 				},
 			},
 		}
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -954,7 +954,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -975,7 +975,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			Status: batchv1.JobStatus{Active: 1},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -992,7 +992,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			Status:     batchv1.JobStatus{Active: 1},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -1018,7 +1018,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
@@ -1034,7 +1034,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 			Status:     batchv1.JobStatus{Succeeded: 1},
 		}
 
-		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(job.Name+"-pod", job))
+		r := makeCheckpointReconciler(s, ckpt, job, newOwnedPod(podNameFromJob(job.Name), job))
 		_, err := r.handleCreating(ctx, ckpt)
 		require.NoError(t, err)
 
