@@ -331,6 +331,26 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{}, err
 	}
 
+	// Required step: create the Snapshot once the source pod exists. The checkpoint cannot
+	// reach Ready without it, so creation failure fails or requeues the capture.
+	checkpointID, err := checkpoint.CheckpointID(ckpt)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	pod, err := r.findSourcePod(ctx, job)
+	if err != nil {
+		if client.IgnoreNotFound(err) == nil {
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if err := r.ensureSnapshot(ctx, ckpt, checkpointID, pod.Name); err != nil {
+		if commonController.IgnoreIntermediateError(err) != nil {
+			r.updateFailedStatus(ctx, ckpt, err)
+		}
+		return ctrl.Result{}, err
+	}
+
 	var lease *coordinationv1.Lease
 	leaseKey := client.ObjectKey{Namespace: job.Namespace, Name: job.Name}
 	lease = &coordinationv1.Lease{}
