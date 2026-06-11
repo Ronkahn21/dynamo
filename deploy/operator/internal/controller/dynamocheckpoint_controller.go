@@ -333,10 +333,6 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 
 	// Required step: create the Snapshot once the source pod exists. The checkpoint cannot
 	// reach Ready without it, so creation failure fails or requeues the capture.
-	if ckpt.UID == "" {
-		// Snapshot ownership is by UID; a UID-less checkpoint is invalid up front.
-		return ctrl.Result{}, fmt.Errorf("DynamoCheckpoint %q has no UID", ckpt.Name)
-	}
 	checkpointID, err := checkpoint.CheckpointID(ckpt)
 	if err != nil {
 		return ctrl.Result{}, err

@@ -44,38 +44,50 @@ func (r *CheckpointReconciler) findSourcePod(ctx context.Context, job *batchv1.J
 	return nil, apierrors.NewNotFound(corev1.Resource("pods"), job.Name)
 }
 
-// ensureSnapshot creates this checkpoint's Snapshot (owned by ckpt) via Server-Side Apply
-// when absent, and is a no-op when it already exists and is ours. Errors propagate to the caller.
+// ensureSnapshot creates this checkpoint's Snapshot (owned by ckpt) via Server-Side Apply when
+// absent, and is a no-op when it already exists and is ours.
 func (r *CheckpointReconciler) ensureSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, sourcePodName string) error {
-	name := snapshotName(checkpointID)
-
-	existing := &nvidiacomv1alpha1.Snapshot{}
-	err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: name}, existing)
-	if err == nil {
-		if metav1.IsControlledBy(existing, ckpt) {
-			return nil
-		}
-		// Forbidden is terminal (see controller_common.IgnoreIntermediateError): a
-		// foreign-owned name collision will not resolve on retry.
-		conflict := apierrors.NewForbidden(
-			nvidiacomv1alpha1.GroupVersion.WithResource("snapshots").GroupResource(),
-			name,
-			fmt.Errorf("exists but is not owned by checkpoint %q", ckpt.Name),
-		)
-		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "SnapshotCreateFailed", conflict.Error())
-		return conflict
-	}
-	if client.IgnoreNotFound(err) != nil {
+	owned, err := r.findOwnedSnapshot(ctx, ckpt, snapshotName(checkpointID))
+	if err != nil {
 		return err
 	}
+	if owned {
+		return nil
+	}
+	return r.applySnapshot(ctx, ckpt, buildSnapshot(ckpt, checkpointID, sourcePodName))
+}
 
-	snap := &nvidiacomv1alpha1.Snapshot{
+// findOwnedSnapshot reports whether this checkpoint's Snapshot already exists and is owned by
+// ckpt. It returns a terminal Forbidden error (and emits an event) when a Snapshot with the same
+// name exists but is owned by another controller; (false, nil) means none exists yet.
+func (r *CheckpointReconciler) findOwnedSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, name string) (bool, error) {
+	existing := &nvidiacomv1alpha1.Snapshot{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: name}, existing); err != nil {
+		return false, client.IgnoreNotFound(err)
+	}
+	if metav1.IsControlledBy(existing, ckpt) {
+		return true, nil
+	}
+	// Forbidden is terminal (see controller_common.IgnoreIntermediateError): a foreign-owned
+	// name collision will not resolve on retry.
+	conflict := apierrors.NewForbidden(
+		nvidiacomv1alpha1.GroupVersion.WithResource("snapshots").GroupResource(),
+		name,
+		fmt.Errorf("exists but is not owned by checkpoint %q", ckpt.Name),
+	)
+	r.Recorder.Event(ckpt, corev1.EventTypeWarning, "SnapshotCreateFailed", conflict.Error())
+	return false, conflict
+}
+
+// buildSnapshot constructs the desired Snapshot for a checkpoint.
+func buildSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, sourcePodName string) *nvidiacomv1alpha1.Snapshot {
+	return &nvidiacomv1alpha1.Snapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
 			Kind:       "Snapshot",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
+			Name:      snapshotName(checkpointID),
 			Namespace: ckpt.Namespace,
 			Labels:    map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
 		},
@@ -86,6 +98,11 @@ func (r *CheckpointReconciler) ensureSnapshot(ctx context.Context, ckpt *nvidiac
 			},
 		},
 	}
+}
+
+// applySnapshot sets ckpt as controller owner and applies the Snapshot via Server-Side Apply,
+// emitting an event on success or failure.
+func (r *CheckpointReconciler) applySnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, snap *nvidiacomv1alpha1.Snapshot) error {
 	if err := ctrl.SetControllerReference(ckpt, snap, r.Scheme()); err != nil {
 		return err
 	}
@@ -94,7 +111,7 @@ func (r *CheckpointReconciler) ensureSnapshot(ctx context.Context, ckpt *nvidiac
 		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "SnapshotCreateFailed", err.Error())
 		return err
 	}
-	r.Recorder.Eventf(ckpt, corev1.EventTypeNormal, "SnapshotCreated", "Created Snapshot %s", name)
+	r.Recorder.Eventf(ckpt, corev1.EventTypeNormal, "SnapshotCreated", "Created Snapshot %s", snap.Name)
 	return nil
 }
 
