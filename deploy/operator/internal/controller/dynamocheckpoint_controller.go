@@ -365,16 +365,13 @@ func (r *CheckpointReconciler) observeSnapshot(ctx context.Context, ckpt *nvidia
 		return ctrl.Result{}, err
 	}
 
-	// Read Snapshot.status only once it is bound; an unbound Snapshot is still being
-	// set up by the SnapshotReconciler. Observe the terminal state and delegate the
-	// status write to a dedicated function.
-	if snap.Status.BoundSnapshotContentName != nil {
-		if nvidiacomv1alpha1.IsSnapshotSucceeded(snap) {
-			return r.markCheckpointReady(ctx, ckpt, checkpointID, snapshotConditionMessage(snap, nvidiacomv1alpha1.SnapshotConditionReady))
-		}
-		if nvidiacomv1alpha1.IsSnapshotFailed(snap) {
-			return r.failCreating(ctx, ckpt, "SnapshotFailed", snapshotConditionMessage(snap, nvidiacomv1alpha1.SnapshotConditionFailed))
-		}
+	// A Snapshot can fail before it is bound (e.g. the SnapshotReconciler rejects the
+	// source pod), so always observe Failed. Ready is only meaningful once bound.
+	if nvidiacomv1alpha1.IsSnapshotFailed(snap) {
+		return r.failCreating(ctx, ckpt, "SnapshotFailed", snapshotConditionMessage(snap, nvidiacomv1alpha1.SnapshotConditionFailed))
+	}
+	if snap.Status.BoundSnapshotContentName != nil && nvidiacomv1alpha1.IsSnapshotSucceeded(snap) {
+		return r.markCheckpointReady(ctx, ckpt, checkpointID, snapshotConditionMessage(snap, nvidiacomv1alpha1.SnapshotConditionReady))
 	}
 
 	// Hang guard 1: the owned Job failed while the Snapshot is still non-terminal.

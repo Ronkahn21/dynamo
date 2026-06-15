@@ -897,6 +897,21 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		assert.Contains(t, updated.Status.Message, "from agent")
 	})
 
+	t.Run("unbound Snapshot Failed transitions checkpoint to Failed", func(t *testing.T) {
+		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
+		job := newCheckpointJob(defaultCheckpointJobName)
+		snap := ownedSnapshot(ckpt, nvidiacomv1alpha1.SnapshotConditionFailed)
+		snap.Status.BoundSnapshotContentName = nil // failed before binding
+
+		r := makeCheckpointReconciler(s, ckpt, job, snap, newOwnedPod(podNameFromJob(job.Name), job))
+		_, err := r.handleCreating(ctx, ckpt)
+		require.NoError(t, err)
+
+		updated := &nvidiacomv1alpha1.DynamoCheckpoint{}
+		require.NoError(t, r.Get(ctx, types.NamespacedName{Name: testHash, Namespace: testNamespace}, updated))
+		assert.Equal(t, nvidiacomv1alpha1.DynamoCheckpointPhaseFailed, updated.Status.Phase)
+	})
+
 	t.Run("failed Job while Snapshot non-terminal transitions to Failed", func(t *testing.T) {
 		ckpt := makeCreatingCkpt(testHash, defaultCheckpointJobName)
 		job := newCheckpointJob(defaultCheckpointJobName)
