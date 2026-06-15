@@ -63,7 +63,8 @@ spec:
             spec:
               description: |-
                 SnapshotContentSpec defines the desired state of SnapshotContent. It is
-                populated by the node agent at creation time and is immutable thereafter.
+                populated by the SnapshotReconciler (operator) at creation time and is
+                immutable thereafter.
               properties:
                 snapshotRef:
                   description: |-
@@ -86,18 +87,35 @@ spec:
                     - namespace
                   type: object
                 source:
-                  description: Source locates the physical artifact via a self-contained, opaque handle.
+                  description: 'Source describes what to capture: the source pod and the node it runs on.'
                   properties:
-                    snapshotHandle:
+                    nodeName:
                       description: |-
-                        SnapshotHandle is a self-contained, opaque artifact locator. The v1alpha1
-                        PVC format is:
-                          pvc://<namespace>/<claimName>/<basePath>/<checkpointID>/versions/<version>
-                        It fully locates the artifact without correlating any other field.
+                        NodeName is the node the source pod runs on, denormalized from the live
+                        pod so it travels with PodRef as one immutable unit and selects the node
+                        agent that performs the dump.
                       minLength: 1
                       type: string
+                    podRef:
+                      description: |-
+                        PodRef identifies the pod to dump. Its UID guards against dumping a
+                        same-named recreation of the pod.
+                      properties:
+                        name:
+                          description: Name of the source pod.
+                          minLength: 1
+                          type: string
+                        uid:
+                          description: |-
+                            UID of the source pod, recorded so the node agent dumps that specific
+                            pod and not a same-named recreation.
+                          type: string
+                      required:
+                        - name
+                      type: object
                   required:
-                    - snapshotHandle
+                    - nodeName
+                    - podRef
                   type: object
               required:
                 - snapshotRef
@@ -164,11 +182,6 @@ spec:
                       - type
                     type: object
                   type: array
-                snapshotHandle:
-                  description: |-
-                    SnapshotHandle mirrors spec.source.snapshotHandle once the node agent has
-                    verified the artifact.
-                  type: string
               type: object
           type: object
           x-kubernetes-validations:

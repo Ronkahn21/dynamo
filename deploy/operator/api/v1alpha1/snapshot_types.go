@@ -19,6 +19,7 @@ package v1alpha1
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Snapshot and SnapshotContent status condition types. Both objects share this
@@ -69,6 +70,11 @@ type PodReference struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+
+	// UID of the source pod, recorded so the node agent dumps that specific
+	// pod and not a same-named recreation.
+	// +optional
+	UID types.UID `json:"uid,omitempty"`
 }
 
 // SnapshotStatus defines the observed state of Snapshot.

@@ -23,14 +23,15 @@ import (
 )
 
 // SnapshotContentSpec defines the desired state of SnapshotContent. It is
-// populated by the node agent at creation time and is immutable thereafter.
+// populated by the SnapshotReconciler (operator) at creation time and is
+// immutable thereafter.
 type SnapshotContentSpec struct {
 	// SnapshotRef is the back-pointer to the bound Snapshot. It may span
 	// namespaces because SnapshotContent is cluster-scoped.
 	// +kubebuilder:validation:Required
 	SnapshotRef SnapshotReference `json:"snapshotRef"`
 
-	// Source locates the physical artifact via a self-contained, opaque handle.
+	// Source describes what to capture: the source pod and the node it runs on.
 	// +kubebuilder:validation:Required
 	Source SnapshotContentSource `json:"source"`
 }
@@ -51,24 +52,24 @@ type SnapshotReference struct {
 	UID types.UID `json:"uid,omitempty"`
 }
 
-// SnapshotContentSource locates the physical checkpoint artifact.
+// SnapshotContentSource is the immutable source descriptor: what to dump
+// (PodRef) and where it runs (NodeName).
 type SnapshotContentSource struct {
-	// SnapshotHandle is a self-contained, opaque artifact locator. The v1alpha1
-	// PVC format is:
-	//   pvc://<namespace>/<claimName>/<basePath>/<checkpointID>/versions/<version>
-	// It fully locates the artifact without correlating any other field.
+	// PodRef identifies the pod to dump. Its UID guards against dumping a
+	// same-named recreation of the pod.
+	// +kubebuilder:validation:Required
+	PodRef PodReference `json:"podRef"`
+
+	// NodeName is the node the source pod runs on, denormalized from the live
+	// pod so it travels with PodRef as one immutable unit and selects the node
+	// agent that performs the dump.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
-	SnapshotHandle string `json:"snapshotHandle"`
+	NodeName string `json:"nodeName"`
 }
 
 // SnapshotContentStatus defines the observed state of SnapshotContent.
 type SnapshotContentStatus struct {
-	// SnapshotHandle mirrors spec.source.snapshotHandle once the node agent has
-	// verified the artifact.
-	// +optional
-	SnapshotHandle *string `json:"snapshotHandle,omitempty"`
-
 	// Conditions reflect the latest observations of the SnapshotContent's state.
 	// Standard types are Ready and Failed.
 	// +optional

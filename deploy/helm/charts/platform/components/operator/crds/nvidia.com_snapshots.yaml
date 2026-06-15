@@ -94,6 +94,11 @@ spec:
                           description: Name of the source pod.
                           minLength: 1
                           type: string
+                        uid:
+                          description: |-
+                            UID of the source pod, recorded so the node agent dumps that specific
+                            pod and not a same-named recreation.
+                          type: string
                       required:
                         - name
                       type: object
