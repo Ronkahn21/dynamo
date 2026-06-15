@@ -30,12 +30,18 @@ const testContainerID = "test-container"
 type fakeRuntime struct {
 	containerIDByPod     string
 	resolvedContainerIDs []string
+	// resolveContainerPID, when set, is returned by ResolveContainer with no error so the
+	// capture path can advance past container resolution.
+	resolveContainerPID int
 }
 
 var _ snapshotruntime.Runtime = (*fakeRuntime)(nil)
 
 func (r *fakeRuntime) ResolveContainer(ctx context.Context, id string) (int, *specs.Spec, error) {
 	r.resolvedContainerIDs = append(r.resolvedContainerIDs, id)
+	if r.resolveContainerPID > 0 {
+		return r.resolveContainerPID, nil, nil
+	}
 	return 0, nil, errors.New("not implemented")
 }
 func (r *fakeRuntime) ResolveContainerIDByPod(ctx context.Context, pod, ns, ctr string) (string, error) {

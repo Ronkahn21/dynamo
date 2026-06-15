@@ -47,13 +47,11 @@ func main() {
 		}
 	}()
 
-	// rootCtx is cancelled on signal. The restore informer's lifetime is bound to
-	// informerCtx, which is only cancelled after the manager's Start returns, so the
-	// restore path keeps running until the capture manager has fully shut down.
+	// rootCtx is cancelled on signal. The single node controller drives both the
+	// restore (pod informer) and capture (SnapshotContent informer) paths and shuts
+	// down when rootCtx is cancelled.
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	informerCtx, stopInformer := context.WithCancel(context.Background())
-	defer stopInformer()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -69,33 +67,13 @@ func main() {
 		"runtime", *runtimeType,
 	)
 
-	// Restore path: the existing node-local client-go controller.
+	// The node controller handles both restore and capture paths.
 	nodeController, err := controller.NewNodeController(cfg, rt, rootLog.WithName("controller"))
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}
-	restoreDone := make(chan error, 1)
-	go func() {
-		agentLog.Info("Snapshot restore controller started")
-		restoreDone <- nodeController.Run(informerCtx)
-	}()
-
-	// Capture path: the per-node SnapshotContent controller-runtime manager.
-	mgr, err := controller.NewSnapshotContentManager(cfg, rt)
-	if err != nil {
-		fatal(agentLog, err, "Failed to create snapshot-content manager")
-	}
-
-	agentLog.Info("Starting snapshot-content manager")
-	startErr := mgr.Start(rootCtx)
-
-	// Manager has returned; now tear down the restore informer.
-	stopInformer()
-	if restoreErr := <-restoreDone; restoreErr != nil {
-		agentLog.Error(restoreErr, "Snapshot restore controller exited with error")
-	}
-	if startErr != nil {
-		fatal(agentLog, startErr, "Snapshot-content manager exited with error")
+	if runErr := nodeController.Run(rootCtx); runErr != nil {
+		fatal(agentLog, runErr, "Snapshot node controller exited with error")
 	}
 
 	agentLog.Info("Agent stopped")

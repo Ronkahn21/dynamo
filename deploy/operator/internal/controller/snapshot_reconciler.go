@@ -154,9 +154,9 @@ func validateSourcePod(pod *corev1.Pod) error {
 	return nil
 }
 
-// ensureSnapshotContent returns the existing SnapshotContent or, when absent, creates it
-// via a single Server-Side Apply carrying source, the node mirror label, and storage-coord
-// metadata. The returned object is the source of truth for the reschedule guard.
+// ensureSnapshotContent returns the existing SnapshotContent or, when absent, creates the
+// trigger via a single Server-Side Apply carrying the source ref and the node mirror label.
+// The returned object is the source of truth for the reschedule guard.
 func (sr *SnapshotReconciler) ensureSnapshotContent(ctx context.Context, snap *nvidiacomv1alpha1.Snapshot, contentName string, pod *corev1.Pod) (*nvidiacomv1alpha1.SnapshotContent, error) {
 	existing := &nvidiacomv1alpha1.SnapshotContent{}
 	if err := sr.Get(ctx, client.ObjectKey{Name: contentName}, existing); err == nil {
@@ -185,10 +185,6 @@ func (sr *SnapshotReconciler) buildSnapshotContent(snap *nvidiacomv1alpha1.Snaps
 			Name: contentName,
 			Labels: map[string]string{
 				snapshotprotocol.SnapshotNodeLabel: pod.Spec.NodeName,
-				snapshotprotocol.CheckpointIDLabel: snap.Spec.CheckpointID,
-			},
-			Annotations: map[string]string{
-				snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.ArtifactVersion(snap.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
 			},
 		},
 		Spec: nvidiacomv1alpha1.SnapshotContentSpec{

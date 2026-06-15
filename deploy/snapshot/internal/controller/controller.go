@@ -20,11 +20,18 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/executor"
 	snapshotruntime "github.com/ai-dynamo/dynamo/deploy/snapshot/internal/runtime"
 	"github.com/ai-dynamo/dynamo/deploy/snapshot/internal/types"
@@ -32,13 +39,19 @@ import (
 )
 
 // NodeController watches local-node pods with checkpoint metadata and reconciles
-// snapshot execution for checkpoint and restore requests.
+// snapshot execution for checkpoint and restore requests. The restore path is
+// driven by a client-go pod informer; the capture path is driven by a dynamic
+// informer over SnapshotContent work orders filtered to this node, with typed
+// reads/writes via an uncached controller-runtime client.
 type NodeController struct {
-	config    *types.AgentConfig
-	clientset kubernetes.Interface
-	runtime   snapshotruntime.Runtime
-	log       logr.Logger
-	holderID  string
+	config       *types.AgentConfig
+	clientset    kubernetes.Interface
+	client       client.Client
+	dynClient    dynamic.Interface
+	runtime      snapshotruntime.Runtime
+	log          logr.Logger
+	holderID     string
+	checkpointFn func(ctx context.Context, params CheckpointParams) error
 
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
@@ -55,7 +68,14 @@ const (
 	containerResolveAttemptTimeout  = 1 * time.Second
 	restoreContainerResolveInterval = 50 * time.Millisecond
 	restoreContainerResolveTimeout  = 30 * time.Second
+
+	// snapshotContentResyncInterval re-drives every SnapshotContent work order so a
+	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
+	snapshotContentResyncInterval = 10 * time.Second
 )
+
+// snapshotContentGVR is the cluster-scoped resource the capture informer watches.
+var snapshotContentGVR = nvidiacomv1alpha1.GroupVersion.WithResource("snapshotcontents")
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
@@ -73,15 +93,33 @@ func NewNodeController(
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 
-	return &NodeController{
+	scheme := runtime.NewScheme()
+	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(nvidiacomv1alpha1.AddToScheme(scheme))
+
+	typedClient, err := client.New(restConfig, client.Options{Scheme: scheme})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create typed client: %w", err)
+	}
+
+	dynClient, err := dynamic.NewForConfig(restConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create dynamic client: %w", err)
+	}
+
+	w := &NodeController{
 		config:    cfg,
 		clientset: clientset,
+		client:    typedClient,
+		dynClient: dynClient,
 		runtime:   rt,
 		log:       log,
 		holderID:  "snapshot-agent/" + uuid.NewString(),
 		inFlight:  make(map[string]struct{}),
 		stopCh:    make(chan struct{}),
-	}, nil
+	}
+	w.checkpointFn = w.executorCheckpoint
+	return w, nil
 }
 
 // Run starts the local pod informers and processes checkpoint/restore events.
@@ -102,8 +140,6 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	var syncFuncs []cache.InformerSynced
 
-	// Capture is driven by the SnapshotContent controller-runtime reconciler; this
-	// client-go controller only handles the restore path.
 	// Restore pods carry a checkpoint ID but are not checkpoint sources.
 	restoreSel, err := labels.Parse(snapshotprotocol.CheckpointIDLabel + ",!" + snapshotprotocol.CheckpointSourceLabel)
 	if err != nil {
@@ -142,6 +178,34 @@ func (w *NodeController) Run(ctx context.Context) error {
 	}
 	go restoreFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, restoreInformer.HasSynced)
+
+	// Capture path: a dynamic informer over SnapshotContent work orders, filtered at
+	// the list/watch level to this node's mirror label. The node-label filter is the
+	// node scoping; reconcileSnapshotContent keeps a defensive nodeName check.
+	nodeContentSelector := labels.SelectorFromSet(labels.Set{snapshotprotocol.SnapshotNodeLabel: w.config.NodeName}).String()
+	dynFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
+		w.dynClient, snapshotContentResyncInterval, metav1.NamespaceAll,
+		func(opts *metav1.ListOptions) {
+			opts.LabelSelector = nodeContentSelector
+		},
+	)
+	contentInformer := dynFactory.ForResource(snapshotContentGVR).Informer()
+	if _, err := contentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			if name, ok := contentNameFromInformerObj(obj); ok {
+				w.reconcileSnapshotContent(ctx, name)
+			}
+		},
+		UpdateFunc: func(_, newObj interface{}) {
+			if name, ok := contentNameFromInformerObj(newObj); ok {
+				w.reconcileSnapshotContent(ctx, name)
+			}
+		},
+	}); err != nil {
+		return fmt.Errorf("failed to add snapshot-content informer handler: %w", err)
+	}
+	go dynFactory.Start(w.stopCh)
+	syncFuncs = append(syncFuncs, contentInformer.HasSynced)
 
 	if !cache.WaitForCacheSync(w.stopCh, syncFuncs...) {
 		return fmt.Errorf("failed to sync informer caches")

@@ -85,11 +85,11 @@ func annotatePod(ctx context.Context, clientset kubernetes.Interface, log logr.L
 
 // acquireLease acquires or renews a checkpoint lease at an arbitrary namespace/name key,
 // returning false when another live holder owns it.
-func (scr *SnapshotContentReconciler) acquireLease(ctx context.Context, key client.ObjectKey) (bool, error) {
+func (w *NodeController) acquireLease(ctx context.Context, key client.ObjectKey) (bool, error) {
 	now := metav1.NewMicroTime(time.Now())
 	leaseDurationSeconds := int32(checkpointLeaseDuration.Seconds())
 
-	leaseClient := scr.Clientset.CoordinationV1().Leases(key.Namespace)
+	leaseClient := w.clientset.CoordinationV1().Leases(key.Namespace)
 	existing, err := leaseClient.Get(ctx, key.Name, metav1.GetOptions{})
 	if err != nil {
 		if !apierrors.IsNotFound(err) {
@@ -98,7 +98,7 @@ func (scr *SnapshotContentReconciler) acquireLease(ctx context.Context, key clie
 		lease := &coordinationv1.Lease{
 			ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace},
 			Spec: coordinationv1.LeaseSpec{
-				HolderIdentity:       &scr.HolderID,
+				HolderIdentity:       &w.holderID,
 				LeaseDurationSeconds: &leaseDurationSeconds,
 				AcquireTime:          &now,
 				RenewTime:            &now,
@@ -115,10 +115,10 @@ func (scr *SnapshotContentReconciler) acquireLease(ctx context.Context, key clie
 
 	if !checkpointLeaseExpired(existing, now.Time) &&
 		existing.Spec.HolderIdentity != nil &&
-		*existing.Spec.HolderIdentity != scr.HolderID {
+		*existing.Spec.HolderIdentity != w.holderID {
 		return false, nil
 	}
-	existing.Spec.HolderIdentity = &scr.HolderID
+	existing.Spec.HolderIdentity = &w.holderID
 	existing.Spec.LeaseDurationSeconds = &leaseDurationSeconds
 	if existing.Spec.AcquireTime == nil || checkpointLeaseExpired(existing, now.Time) {
 		existing.Spec.AcquireTime = &now
@@ -134,7 +134,7 @@ func (scr *SnapshotContentReconciler) acquireLease(ctx context.Context, key clie
 }
 
 // renewLease periodically renews the lease until ctx is cancelled.
-func (scr *SnapshotContentReconciler) renewLease(ctx context.Context, key client.ObjectKey) {
+func (w *NodeController) renewLease(ctx context.Context, key client.ObjectKey) {
 	ticker := time.NewTicker(checkpointLeaseRenewInterval)
 	defer ticker.Stop()
 	for {
@@ -142,7 +142,7 @@ func (scr *SnapshotContentReconciler) renewLease(ctx context.Context, key client
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := scr.renewLeaseOnce(ctx, key); err != nil {
+			if err := w.renewLeaseOnce(ctx, key); err != nil {
 				log.FromContext(ctx).Error(err, "Failed to renew checkpoint lease", "lease", key.String())
 				return
 			}
@@ -151,14 +151,14 @@ func (scr *SnapshotContentReconciler) renewLease(ctx context.Context, key client
 }
 
 // renewLeaseOnce bumps the lease renew time, failing if this holder no longer owns it.
-func (scr *SnapshotContentReconciler) renewLeaseOnce(ctx context.Context, key client.ObjectKey) error {
-	leaseClient := scr.Clientset.CoordinationV1().Leases(key.Namespace)
+func (w *NodeController) renewLeaseOnce(ctx context.Context, key client.ObjectKey) error {
+	leaseClient := w.clientset.CoordinationV1().Leases(key.Namespace)
 	lease, err := leaseClient.Get(ctx, key.Name, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("get checkpoint lease %s for renewal: %w", key.String(), err)
 	}
-	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != scr.HolderID {
-		return fmt.Errorf("checkpoint lease %s is no longer held by %q", key.String(), scr.HolderID)
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != w.holderID {
+		return fmt.Errorf("checkpoint lease %s is no longer held by %q", key.String(), w.holderID)
 	}
 	now := metav1.NewMicroTime(time.Now())
 	leaseDurationSeconds := int32(checkpointLeaseDuration.Seconds())
@@ -171,8 +171,8 @@ func (scr *SnapshotContentReconciler) renewLeaseOnce(ctx context.Context, key cl
 }
 
 // releaseLease deletes the lease if this holder owns it.
-func (scr *SnapshotContentReconciler) releaseLease(ctx context.Context, key client.ObjectKey) error {
-	leaseClient := scr.Clientset.CoordinationV1().Leases(key.Namespace)
+func (w *NodeController) releaseLease(ctx context.Context, key client.ObjectKey) error {
+	leaseClient := w.clientset.CoordinationV1().Leases(key.Namespace)
 	lease, err := leaseClient.Get(ctx, key.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -180,7 +180,7 @@ func (scr *SnapshotContentReconciler) releaseLease(ctx context.Context, key clie
 		}
 		return fmt.Errorf("get checkpoint lease %s for release: %w", key.String(), err)
 	}
-	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != scr.HolderID {
+	if lease.Spec.HolderIdentity == nil || *lease.Spec.HolderIdentity != w.holderID {
 		return nil
 	}
 	if err := leaseClient.Delete(ctx, key.Name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
