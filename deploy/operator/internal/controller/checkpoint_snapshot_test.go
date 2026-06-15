@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
+	snapshotprotocol "github.com/ai-dynamo/dynamo/deploy/snapshot/protocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	batchv1 "k8s.io/api/batch/v1"
@@ -107,7 +108,7 @@ func TestEnsureSnapshot_CreatesWhenAbsent(t *testing.T) {
 	snap := &nvidiacomv1alpha1.Snapshot{}
 	require.NoError(t, r.Get(context.Background(),
 		client.ObjectKey{Namespace: testNamespace, Name: snapshotName(testHash)}, snap))
-	assert.Equal(t, testHash, snap.Spec.CheckpointID)
+	assert.Equal(t, testHash, snap.Labels[snapshotprotocol.CheckpointIDLabel])
 	assert.Equal(t, "worker-xyz", snap.Spec.Source.PodRef.Name)
 	assert.True(t, metav1.IsControlledBy(snap, ckpt), "snapshot must be controlled by the checkpoint")
 }
@@ -130,8 +131,7 @@ func TestEnsureSnapshot_ErrorsWhenNotOwned(t *testing.T) {
 	foreign := &nvidiacomv1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: snapshotName(testHash), Namespace: testNamespace},
 		Spec: nvidiacomv1alpha1.SnapshotSpec{
-			CheckpointID: testHash,
-			Source:       nvidiacomv1alpha1.SnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "someone-else"}},
+			Source: nvidiacomv1alpha1.SnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "someone-else"}},
 		},
 	}
 	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt, foreign)

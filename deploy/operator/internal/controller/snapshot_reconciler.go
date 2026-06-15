@@ -29,7 +29,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -115,11 +114,14 @@ func (sr *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{RequeueAfter: jitteredBackoff(snapshotPodResolveBackoffBase)}, nil
 	}
 
-	contentName := snapshotContentName(snap.Spec.CheckpointID)
-	if errs := validation.IsDNS1123Subdomain(contentName); len(errs) > 0 || len(contentName) > maxResourceNameLength {
-		return sr.failSnapshot(ctx, snap, "InvalidContentName",
-			fmt.Errorf("composed SnapshotContent name %q is invalid: too long or not a DNS subdomain", contentName))
+	// The checkpoint ID is carried as a label (set by the DynamoCheckpoint controller),
+	// not a spec field; the agent independently reads it from the source pod.
+	id := snap.Labels[snapshotprotocol.CheckpointIDLabel]
+	if id == "" {
+		return sr.failSnapshot(ctx, snap, "MissingCheckpointID",
+			fmt.Errorf("snapshot %q missing %s label", snap.Name, snapshotprotocol.CheckpointIDLabel))
 	}
+	contentName := snapshotContentName(id)
 
 	content, err := sr.ensureSnapshotContent(ctx, snap, contentName, pod)
 	if err != nil {
@@ -260,7 +262,18 @@ func (sr *SnapshotReconciler) handleDelete(ctx context.Context, snap *nvidiacomv
 		return ctrl.Result{}, nil
 	}
 
-	contentName := snapshotContentName(snap.Spec.CheckpointID)
+	// Without a checkpoint-id label no SnapshotContent could have been bound; drop the
+	// finalizer rather than misroute a delete to a wrongly-named object.
+	id := snap.Labels[snapshotprotocol.CheckpointIDLabel]
+	if id == "" {
+		controllerutil.RemoveFinalizer(snap, snapshotFinalizer)
+		if err := sr.Update(ctx, snap); err != nil {
+			return ctrl.Result{}, fmt.Errorf("remove snapshot finalizer: %w", err)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	contentName := snapshotContentName(id)
 	content := &nvidiacomv1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}}
 	if err := sr.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
 		return ctrl.Result{}, fmt.Errorf("delete SnapshotContent %q: %w", contentName, err)

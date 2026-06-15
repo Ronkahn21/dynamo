@@ -92,7 +92,6 @@ func buildSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, sourc
 			Labels:    map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
 		},
 		Spec: nvidiacomv1alpha1.SnapshotSpec{
-			CheckpointID: checkpointID,
 			Source: nvidiacomv1alpha1.SnapshotSource{
 				PodRef: nvidiacomv1alpha1.PodReference{Name: sourcePodName},
 			},

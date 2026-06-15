@@ -828,7 +828,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 		snap := &nvidiacomv1alpha1.Snapshot{}
 		require.NoError(t, r.Get(ctx,
 			types.NamespacedName{Name: snapshotName(testHash), Namespace: testNamespace}, snap))
-		assert.Equal(t, testHash, snap.Spec.CheckpointID)
+		assert.Equal(t, testHash, snap.Labels[snapshotprotocol.CheckpointIDLabel])
 		assert.Equal(t, "worker-0", snap.Spec.Source.PodRef.Name)
 		assert.True(t, metav1.IsControlledBy(snap, ckpt))
 	})
@@ -850,8 +850,7 @@ func TestCheckpointReconciler_HandleCreating(t *testing.T) {
 				}},
 			},
 			Spec: nvidiacomv1alpha1.SnapshotSpec{
-				CheckpointID: testHash,
-				Source:       nvidiacomv1alpha1.SnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}},
+				Source: nvidiacomv1alpha1.SnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}},
 			},
 			Status: nvidiacomv1alpha1.SnapshotStatus{BoundSnapshotContentName: &bound},
 		}

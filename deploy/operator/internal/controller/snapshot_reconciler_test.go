@@ -19,7 +19,6 @@ package controller
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -59,15 +58,14 @@ func makeSnapshotReconciler(s *runtime.Scheme, objs ...client.Object) *SnapshotR
 func makeSnapshotForReconcile(checkpointID, podName string) *nvidiacomv1alpha1.Snapshot {
 	return &nvidiacomv1alpha1.Snapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:        "snapshot-" + checkpointID,
-			Namespace:   "inference",
-			UID:         types.UID("snap-uid"),
-			Finalizers:  []string{snapshotFinalizer},
-			Annotations: map[string]string{snapshotprotocol.CheckpointArtifactVersionAnnotation: "3"},
+			Name:       "snapshot-" + checkpointID,
+			Namespace:  "inference",
+			UID:        types.UID("snap-uid"),
+			Finalizers: []string{snapshotFinalizer},
+			Labels:     map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
 		},
 		Spec: nvidiacomv1alpha1.SnapshotSpec{
-			CheckpointID: checkpointID,
-			Source:       nvidiacomv1alpha1.SnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: podName}},
+			Source: nvidiacomv1alpha1.SnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: podName}},
 		},
 	}
 }
@@ -186,16 +184,10 @@ func TestSnapshotReconciler_RescheduleFailsSnapshot(t *testing.T) {
 	assert.Equal(t, "PodRescheduled", cond.Reason)
 }
 
-func TestSnapshotReconciler_ComposedNameTooLongFails(t *testing.T) {
+func TestSnapshotReconciler_MissingCheckpointIDLabelFails(t *testing.T) {
 	s := snapshotReconcilerScheme()
-	longID := strings.Repeat("a", 250) // "snapshotcontent-" + 250 = 266 > 253
-	snap := &nvidiacomv1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: "snapshot-x", Namespace: "inference", Finalizers: []string{snapshotFinalizer}},
-		Spec: nvidiacomv1alpha1.SnapshotSpec{
-			CheckpointID: longID,
-			Source:       nvidiacomv1alpha1.SnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}},
-		},
-	}
+	snap := makeSnapshotForReconcile("abc123", "worker-0")
+	delete(snap.Labels, snapshotprotocol.CheckpointIDLabel)
 	r := makeSnapshotReconciler(s, snap, scheduledPod("worker-0", "node-a"))
 
 	reconcileSnapshot(t, r, snap.Name)
@@ -204,7 +196,26 @@ func TestSnapshotReconciler_ComposedNameTooLongFails(t *testing.T) {
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
 	cond := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
 	require.NotNil(t, cond)
-	assert.Equal(t, "InvalidContentName", cond.Reason)
+	assert.Equal(t, "MissingCheckpointID", cond.Reason)
+}
+
+func TestSnapshotReconciler_DeleteWithoutLabelDropsFinalizer(t *testing.T) {
+	s := snapshotReconcilerScheme()
+	now := metav1.Now()
+	snap := makeSnapshotForReconcile("abc123", "worker-0")
+	snap.DeletionTimestamp = &now
+	delete(snap.Labels, snapshotprotocol.CheckpointIDLabel)
+	r := makeSnapshotReconciler(s, snap)
+
+	reconcileSnapshot(t, r, snap.Name)
+
+	gone := &nvidiacomv1alpha1.Snapshot{}
+	err := r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, gone)
+	if err == nil {
+		assert.False(t, controllerutil.ContainsFinalizer(gone, snapshotFinalizer))
+	} else {
+		assert.True(t, apierrors.IsNotFound(err))
+	}
 }
 
 func TestSnapshotReconciler_CascadeDelete(t *testing.T) {
