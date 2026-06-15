@@ -245,7 +245,6 @@ rules:
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
-  - snapshotcontents/finalizers
   - snapshots/finalizers
   verbs:
   - update

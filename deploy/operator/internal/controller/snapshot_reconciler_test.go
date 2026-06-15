@@ -116,7 +116,7 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.Equal(t, "node-a", content.Labels[snapshotprotocol.SnapshotNodeLabel])
 	assert.Equal(t, "abc123", content.Labels[snapshotprotocol.CheckpointIDLabel])
 	assert.Equal(t, "3", content.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation])
-	assert.Contains(t, content.Finalizers, snapshotFinalizer)
+	assert.Empty(t, content.Finalizers)
 	assert.Equal(t, "inference", content.Spec.SnapshotRef.Namespace)
 	assert.Equal(t, snap.Name, content.Spec.SnapshotRef.Name)
 
@@ -213,7 +213,7 @@ func TestSnapshotReconciler_CascadeDelete(t *testing.T) {
 	snap := makeSnapshotForReconcile("abc123", "worker-0")
 	snap.DeletionTimestamp = &now
 	content := &nvidiacomv1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "snapshotcontent-abc123", Finalizers: []string{snapshotFinalizer}},
+		ObjectMeta: metav1.ObjectMeta{Name: "snapshotcontent-abc123"},
 		Spec: nvidiacomv1alpha1.SnapshotContentSpec{
 			SnapshotRef: nvidiacomv1alpha1.SnapshotReference{Namespace: "inference", Name: snap.Name},
 			Source:      nvidiacomv1alpha1.SnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}, NodeName: "node-a"},
@@ -221,14 +221,12 @@ func TestSnapshotReconciler_CascadeDelete(t *testing.T) {
 	}
 	r := makeSnapshotReconciler(s, snap, content)
 
-	// First pass deletes the content and clears its finalizer; it requeues.
-	res := reconcileSnapshot(t, r, snap.Name)
-	assert.Positive(t, res.RequeueAfter)
+	// The content carries no finalizer, so it is deleted immediately; one pass deletes
+	// the content and, once confirmed gone, drops the Snapshot finalizer.
+	reconcileSnapshot(t, r, snap.Name)
 	err := r.Get(context.Background(), types.NamespacedName{Name: "snapshotcontent-abc123"}, &nvidiacomv1alpha1.SnapshotContent{})
 	assert.True(t, apierrors.IsNotFound(err))
 
-	// Second pass drops the Snapshot finalizer now that the content is gone.
-	reconcileSnapshot(t, r, snap.Name)
 	gone := &nvidiacomv1alpha1.Snapshot{}
 	err = r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, gone)
 	if err == nil {

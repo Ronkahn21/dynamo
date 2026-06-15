@@ -33,13 +33,10 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/operator/api/v1alpha1"
@@ -47,7 +44,8 @@ import (
 )
 
 const (
-	// snapshotFinalizer guards SnapshotContent cleanup before a Snapshot is removed.
+	// snapshotFinalizer is set on the Snapshot so its bound SnapshotContent is
+	// deleted before the Snapshot is removed.
 	snapshotFinalizer = "nvidia.com/snapshot-content-cleanup"
 
 	// snapshotContentFieldManager is the Server-Side Apply field owner for SnapshotContents.
@@ -81,7 +79,6 @@ type SnapshotReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshots/finalizers,verbs=update
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotcontents,verbs=create;get;list;watch;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=snapshotcontents/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups=nvidia.com,resources=snapshotcontents/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch
 
 // Reconcile drives a Snapshot through binding, status mirroring, and cascade deletion.
@@ -105,13 +102,17 @@ func (sr *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		return ctrl.Result{}, nil
 	}
 
-	pod, err := sr.resolveSourcePod(ctx, snap)
+	pod, err := sr.getSourcePod(ctx, snap)
 	if err != nil {
-		if errors.Is(err, errSnapshotPodUnscheduled) || apierrors.IsNotFound(err) {
-			logger.V(1).Info("Source pod not ready, backing off", "snapshot", snap.Name, "reason", err.Error())
+		if apierrors.IsNotFound(err) {
+			logger.V(1).Info("Source pod not found, backing off", "snapshot", snap.Name)
 			return ctrl.Result{RequeueAfter: jitteredBackoff(snapshotPodResolveBackoffBase)}, nil
 		}
 		return ctrl.Result{}, err
+	}
+	if err := validateSourcePod(pod); err != nil {
+		logger.V(1).Info("Source pod not ready, backing off", "snapshot", snap.Name, "reason", err.Error())
+		return ctrl.Result{RequeueAfter: jitteredBackoff(snapshotPodResolveBackoffBase)}, nil
 	}
 
 	contentName := snapshotContentName(snap.Spec.CheckpointID)
@@ -120,61 +121,57 @@ func (sr *SnapshotReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 			fmt.Errorf("composed SnapshotContent name %q is invalid: too long or not a DNS subdomain", contentName))
 	}
 
-	bound, err := sr.findBoundContent(ctx, contentName)
+	content, err := sr.ensureSnapshotContent(ctx, snap, contentName, pod)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
-	if bound != nil && bound.Spec.Source.NodeName != pod.Spec.NodeName {
+	// A freshly-created content always matches; only a pre-existing content whose
+	// source pod was rescheduled to another node mismatches (spec is immutable).
+	if content.Spec.Source.NodeName != pod.Spec.NodeName {
 		return sr.failSnapshot(ctx, snap, "PodRescheduled",
 			fmt.Errorf("source pod moved from node %q to %q; CRIU checkpoint cannot survive migration",
-				bound.Spec.Source.NodeName, pod.Spec.NodeName))
+				content.Spec.Source.NodeName, pod.Spec.NodeName))
 	}
 
-	if err := sr.ensureSnapshotContent(ctx, snap, contentName, pod); err != nil {
-		return ctrl.Result{}, err
-	}
-
-	if err := sr.bindAndMirror(ctx, snap, contentName); err != nil {
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
+	return sr.propagateStatus(ctx, snap, content)
 }
 
-// resolveSourcePod loads the source pod and requires it be scheduled to a node.
-func (sr *SnapshotReconciler) resolveSourcePod(ctx context.Context, snap *nvidiacomv1alpha1.Snapshot) (*corev1.Pod, error) {
+// getSourcePod loads the source pod referenced by the Snapshot.
+func (sr *SnapshotReconciler) getSourcePod(ctx context.Context, snap *nvidiacomv1alpha1.Snapshot) (*corev1.Pod, error) {
 	pod := &corev1.Pod{}
 	key := client.ObjectKey{Namespace: snap.Namespace, Name: snap.Spec.Source.PodRef.Name}
 	if err := sr.Get(ctx, key, pod); err != nil {
 		return nil, err
 	}
-	if pod.Spec.NodeName == "" {
-		return nil, errSnapshotPodUnscheduled
-	}
 	return pod, nil
 }
 
-// findBoundContent returns the bound SnapshotContent if it already exists, or nil.
-func (sr *SnapshotReconciler) findBoundContent(ctx context.Context, contentName string) (*nvidiacomv1alpha1.SnapshotContent, error) {
-	content := &nvidiacomv1alpha1.SnapshotContent{}
-	if err := sr.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
+// validateSourcePod requires the pod to be scheduled to a node.
+func validateSourcePod(pod *corev1.Pod) error {
+	if pod.Spec.NodeName == "" {
+		return errSnapshotPodUnscheduled
 	}
-	return content, nil
+	return nil
 }
 
-// ensureSnapshotContent applies the SnapshotContent work order via a single Server-Side
-// Apply carrying source, the node mirror label, storage-coord metadata, and the finalizer.
-func (sr *SnapshotReconciler) ensureSnapshotContent(ctx context.Context, snap *nvidiacomv1alpha1.Snapshot, contentName string, pod *corev1.Pod) error {
+// ensureSnapshotContent returns the existing SnapshotContent or, when absent, creates it
+// via a single Server-Side Apply carrying source, the node mirror label, and storage-coord
+// metadata. The returned object is the source of truth for the reschedule guard.
+func (sr *SnapshotReconciler) ensureSnapshotContent(ctx context.Context, snap *nvidiacomv1alpha1.Snapshot, contentName string, pod *corev1.Pod) (*nvidiacomv1alpha1.SnapshotContent, error) {
+	existing := &nvidiacomv1alpha1.SnapshotContent{}
+	if err := sr.Get(ctx, client.ObjectKey{Name: contentName}, existing); err == nil {
+		return existing, nil
+	} else if !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+
 	content := sr.buildSnapshotContent(snap, contentName, pod)
 	if err := sr.Patch(ctx, content, client.Apply,
 		client.FieldOwner(snapshotContentFieldManager), client.ForceOwnership); err != nil {
 		sr.Recorder.Event(snap, corev1.EventTypeWarning, "SnapshotContentCreateFailed", err.Error())
-		return fmt.Errorf("apply SnapshotContent %q: %w", contentName, err)
+		return nil, fmt.Errorf("apply SnapshotContent %q: %w", contentName, err)
 	}
-	return nil
+	return content, nil
 }
 
 // buildSnapshotContent constructs the desired cluster-scoped SnapshotContent for a Snapshot.
@@ -193,7 +190,6 @@ func (sr *SnapshotReconciler) buildSnapshotContent(snap *nvidiacomv1alpha1.Snaps
 			Annotations: map[string]string{
 				snapshotprotocol.CheckpointArtifactVersionAnnotation: snapshotprotocol.ArtifactVersion(snap.Annotations[snapshotprotocol.CheckpointArtifactVersionAnnotation]),
 			},
-			Finalizers: []string{snapshotFinalizer},
 		},
 		Spec: nvidiacomv1alpha1.SnapshotContentSpec{
 			SnapshotRef: nvidiacomv1alpha1.SnapshotReference{
@@ -209,38 +205,35 @@ func (sr *SnapshotReconciler) buildSnapshotContent(snap *nvidiacomv1alpha1.Snaps
 	}
 }
 
-// bindAndMirror records the binding and mirrors the SnapshotContent's terminal status to
-// the Snapshot, defaulting to a Pending condition until the agent writes a result.
-func (sr *SnapshotReconciler) bindAndMirror(ctx context.Context, snap *nvidiacomv1alpha1.Snapshot, contentName string) error {
-	content := &nvidiacomv1alpha1.SnapshotContent{}
-	if err := sr.Get(ctx, client.ObjectKey{Name: contentName}, content); err != nil {
-		return client.IgnoreNotFound(err)
-	}
-
+// propagateStatus records the binding and mirrors the SnapshotContent's terminal status to
+// the Snapshot, defaulting to a Pending condition until the agent writes a result. It
+// receives the content resolved earlier in the reconcile, so it never re-Gets it.
+func (sr *SnapshotReconciler) propagateStatus(ctx context.Context, snap *nvidiacomv1alpha1.Snapshot, content *nvidiacomv1alpha1.SnapshotContent) (ctrl.Result, error) {
 	changed := false
-	if snap.Status.BoundSnapshotContentName == nil || *snap.Status.BoundSnapshotContentName != contentName {
-		snap.Status.BoundSnapshotContentName = &contentName
+	if snap.Status.BoundSnapshotContentName == nil || *snap.Status.BoundSnapshotContentName != content.Name {
+		name := content.Name
+		snap.Status.BoundSnapshotContentName = &name
 		changed = true
 	}
 
-	ready := meta.FindStatusCondition(content.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionReady)
-	failed := meta.FindStatusCondition(content.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
 	switch {
-	case ready != nil && ready.Status == metav1.ConditionTrue:
-		changed = sr.setCondition(snap, nvidiacomv1alpha1.SnapshotConditionReady, metav1.ConditionTrue, ready.Reason, ready.Message) || changed
-	case failed != nil && failed.Status == metav1.ConditionTrue:
-		changed = sr.setCondition(snap, nvidiacomv1alpha1.SnapshotConditionFailed, metav1.ConditionTrue, failed.Reason, failed.Message) || changed
+	case nvidiacomv1alpha1.IsSnapshotContentSucceeded(content):
+		cond := meta.FindStatusCondition(content.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionReady)
+		changed = sr.setCondition(snap, nvidiacomv1alpha1.SnapshotConditionReady, metav1.ConditionTrue, cond.Reason, cond.Message) || changed
+	case nvidiacomv1alpha1.IsSnapshotContentFailed(content):
+		cond := meta.FindStatusCondition(content.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
+		changed = sr.setCondition(snap, nvidiacomv1alpha1.SnapshotConditionFailed, metav1.ConditionTrue, cond.Reason, cond.Message) || changed
 	default:
 		changed = sr.setCondition(snap, nvidiacomv1alpha1.SnapshotConditionReady, metav1.ConditionFalse, "Pending", "Waiting for node agent to capture the checkpoint") || changed
 	}
 
 	if !changed {
-		return nil
+		return ctrl.Result{}, nil
 	}
 	if err := sr.Status().Update(ctx, snap); err != nil {
-		return fmt.Errorf("update snapshot status: %w", err)
+		return ctrl.Result{}, fmt.Errorf("update snapshot status: %w", err)
 	}
-	return nil
+	return ctrl.Result{}, nil
 }
 
 // setCondition sets a status condition and reports whether it changed.
@@ -263,37 +256,25 @@ func (sr *SnapshotReconciler) failSnapshot(ctx context.Context, snap *nvidiacomv
 	return ctrl.Result{}, nil
 }
 
-// handleDelete cascades deletion to the bound SnapshotContent, waits for it to be gone,
-// then drops the Snapshot finalizer.
+// handleDelete cascades deletion to the bound SnapshotContent and blocks (requeues) until
+// it is gone before dropping the Snapshot finalizer. The SnapshotContent carries no
+// finalizer of its own, so the Delete takes effect immediately.
 func (sr *SnapshotReconciler) handleDelete(ctx context.Context, snap *nvidiacomv1alpha1.Snapshot) (ctrl.Result, error) {
 	if !controllerutil.ContainsFinalizer(snap, snapshotFinalizer) {
 		return ctrl.Result{}, nil
 	}
 
 	contentName := snapshotContentName(snap.Spec.CheckpointID)
-	content := &nvidiacomv1alpha1.SnapshotContent{}
-	err := sr.Get(ctx, client.ObjectKey{Name: contentName}, content)
-	switch {
-	case err == nil:
-		// Clear the controller finalizer first so the subsequent Delete is not
-		// blocked, then issue the Delete. The reconcile requeues until the
-		// SnapshotContent is fully gone.
-		if controllerutil.ContainsFinalizer(content, snapshotFinalizer) {
-			controllerutil.RemoveFinalizer(content, snapshotFinalizer)
-			if updErr := sr.Update(ctx, content); updErr != nil && !apierrors.IsNotFound(updErr) {
-				return ctrl.Result{}, fmt.Errorf("clear SnapshotContent %q finalizer: %w", contentName, updErr)
-			}
-		}
-		if content.GetDeletionTimestamp().IsZero() {
-			if delErr := sr.Delete(ctx, content); delErr != nil && !apierrors.IsNotFound(delErr) {
-				return ctrl.Result{}, fmt.Errorf("delete SnapshotContent %q: %w", contentName, delErr)
-			}
-		}
+	content := &nvidiacomv1alpha1.SnapshotContent{ObjectMeta: metav1.ObjectMeta{Name: contentName}}
+	if err := sr.Delete(ctx, content); err != nil && !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("delete SnapshotContent %q: %w", contentName, err)
+	}
+
+	// Block until the content is confirmed gone before releasing the Snapshot.
+	if err := sr.Get(ctx, client.ObjectKey{Name: contentName}, &nvidiacomv1alpha1.SnapshotContent{}); err == nil {
 		return ctrl.Result{RequeueAfter: snapshotContentDeleteRequeue}, nil
-	case apierrors.IsNotFound(err):
-		// SnapshotContent gone; drop the Snapshot finalizer.
-	default:
-		return ctrl.Result{}, fmt.Errorf("get SnapshotContent %q: %w", contentName, err)
+	} else if !apierrors.IsNotFound(err) {
+		return ctrl.Result{}, fmt.Errorf("confirm SnapshotContent %q deleted: %w", contentName, err)
 	}
 
 	controllerutil.RemoveFinalizer(snap, snapshotFinalizer)
@@ -311,12 +292,6 @@ func (sr *SnapshotReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(
 			&nvidiacomv1alpha1.SnapshotContent{},
 			handler.EnqueueRequestsFromMapFunc(snapshotContentToSnapshot),
-			builder.WithPredicates(predicate.Funcs{
-				CreateFunc:  func(event.CreateEvent) bool { return false },
-				UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
-				DeleteFunc:  func(event.DeleteEvent) bool { return true },
-				GenericFunc: func(event.GenericEvent) bool { return false },
-			}),
 		).
 		Complete(sr)
 }

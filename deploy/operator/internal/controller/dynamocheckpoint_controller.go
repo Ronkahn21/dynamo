@@ -30,6 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -356,8 +357,6 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 // hang guards) onto the DynamoCheckpoint phase. Completion cascades up from SnapshotContent
 // → Snapshot → DynamoCheckpoint, so this never reads the Job's terminal annotation.
 func (r *CheckpointReconciler) observeSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, checkpointID string) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-
 	snap := &nvidiacomv1alpha1.Snapshot{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: snapshotName(checkpointID)}, snap); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -367,26 +366,14 @@ func (r *CheckpointReconciler) observeSnapshot(ctx context.Context, ckpt *nvidia
 	}
 
 	// Read Snapshot.status only once it is bound; an unbound Snapshot is still being
-	// set up by the SnapshotReconciler.
+	// set up by the SnapshotReconciler. Observe the terminal state and delegate the
+	// status write to a dedicated function.
 	if snap.Status.BoundSnapshotContentName != nil {
-		if cond := meta.FindStatusCondition(snap.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionReady); cond != nil && cond.Status == metav1.ConditionTrue {
-			logger.Info("Snapshot ready", "snapshot", snap.Name)
-			r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", cond.Message)
-			now := metav1.Now()
-			ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
-			ckpt.Status.CheckpointID = checkpointID
-			ckpt.Status.CreatedAt = &now
-			ckpt.Status.Message = ""
-			meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
-				Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
-				Status:  metav1.ConditionTrue,
-				Reason:  "SnapshotReady",
-				Message: cond.Message,
-			})
-			return ctrl.Result{}, r.Status().Update(ctx, ckpt)
+		if nvidiacomv1alpha1.IsSnapshotSucceeded(snap) {
+			return r.markCheckpointReady(ctx, ckpt, checkpointID, snapshotConditionMessage(snap, nvidiacomv1alpha1.SnapshotConditionReady))
 		}
-		if cond := meta.FindStatusCondition(snap.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed); cond != nil && cond.Status == metav1.ConditionTrue {
-			return r.failCreating(ctx, ckpt, "SnapshotFailed", cond.Message)
+		if nvidiacomv1alpha1.IsSnapshotFailed(snap) {
+			return r.failCreating(ctx, ckpt, "SnapshotFailed", snapshotConditionMessage(snap, nvidiacomv1alpha1.SnapshotConditionFailed))
 		}
 	}
 
@@ -420,6 +407,31 @@ func (r *CheckpointReconciler) failCreating(ctx context.Context, ckpt *nvidiacom
 		Message: message,
 	})
 	return ctrl.Result{}, r.Status().Update(ctx, ckpt)
+}
+
+// markCheckpointReady marks the DynamoCheckpoint Ready after its bound Snapshot succeeded.
+func (r *CheckpointReconciler) markCheckpointReady(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, message string) (ctrl.Result, error) {
+	log.FromContext(ctx).Info("Checkpoint ready", "checkpointID", checkpointID)
+	r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", message)
+	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseReady
+	ckpt.Status.CheckpointID = checkpointID
+	ckpt.Status.CreatedAt = ptr.To(metav1.Now())
+	ckpt.Status.Message = ""
+	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
+		Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
+		Status:  metav1.ConditionTrue,
+		Reason:  "SnapshotReady",
+		Message: message,
+	})
+	return ctrl.Result{}, r.Status().Update(ctx, ckpt)
+}
+
+// snapshotConditionMessage returns the message of the named Snapshot condition, or "".
+func snapshotConditionMessage(snap *nvidiacomv1alpha1.Snapshot, condType string) string {
+	if cond := meta.FindStatusCondition(snap.Status.Conditions, condType); cond != nil {
+		return cond.Message
+	}
+	return ""
 }
 
 // checkpointJobFailed reports whether the Job has a True JobFailed condition.
@@ -520,10 +532,11 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
 		Owns(&nvidiacomv1alpha1.Snapshot{}, builder.WithPredicates(predicate.Funcs{
-			// Status mirror cascades up via Snapshot status updates only; ignore
-			// create/delete so the mirror cannot storm.
+			// Ignore create (we just created it). Watch update (status mirror) and
+			// delete (re-enqueue to recreate / unblock). Delete is safe: reconcile
+			// exits at the deletion-timestamp guard before reaching observeSnapshot.
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
-			DeleteFunc:  func(de event.DeleteEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return false },
 		})).
