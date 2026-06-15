@@ -47,11 +47,21 @@ func main() {
 		}
 	}()
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// rootCtx is cancelled on signal. The restore informer's lifetime is bound to
+	// informerCtx, which is only cancelled after the manager's Start returns, so the
+	// restore path keeps running until the capture manager has fully shut down.
+	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	informerCtx, stopInformer := context.WithCancel(context.Background())
+	defer stopInformer()
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		agentLog.Info("Shutting down")
+		cancel()
+	}()
 
 	agentLog.Info("Starting snapshot agent",
 		"node", cfg.NodeName,
@@ -59,34 +69,33 @@ func main() {
 		"runtime", *runtimeType,
 	)
 
+	// Restore path: the existing node-local client-go controller.
 	nodeController, err := controller.NewNodeController(cfg, rt, rootLog.WithName("controller"))
 	if err != nil {
 		fatal(agentLog, err, "Failed to create snapshot node controller")
 	}
-
-	// Run the node-local controller in the background.
-	controllerDone := make(chan error, 1)
+	restoreDone := make(chan error, 1)
 	go func() {
-		agentLog.Info("Snapshot node controller started")
-		controllerDone <- nodeController.Run(ctx)
+		agentLog.Info("Snapshot restore controller started")
+		restoreDone <- nodeController.Run(informerCtx)
 	}()
 
-	// Wait for signal or controller exit.
-	select {
-	case <-sigChan:
-		agentLog.Info("Shutting down")
-		cancel()
-		select {
-		case err := <-controllerDone:
-			if err != nil {
-				agentLog.Error(err, "Snapshot node controller exited with error during shutdown")
-			}
-		default:
-		}
-	case err := <-controllerDone:
-		if err != nil {
-			fatal(agentLog, err, "Snapshot node controller exited with error")
-		}
+	// Capture path: the per-node SnapshotContent controller-runtime manager.
+	mgr, err := controller.NewSnapshotContentManager(cfg, rt)
+	if err != nil {
+		fatal(agentLog, err, "Failed to create snapshot-content manager")
+	}
+
+	agentLog.Info("Starting snapshot-content manager")
+	startErr := mgr.Start(rootCtx)
+
+	// Manager has returned; now tear down the restore informer.
+	stopInformer()
+	if restoreErr := <-restoreDone; restoreErr != nil {
+		agentLog.Error(restoreErr, "Snapshot restore controller exited with error")
+	}
+	if startErr != nil {
+		fatal(agentLog, startErr, "Snapshot-content manager exited with error")
 	}
 
 	agentLog.Info("Agent stopped")
