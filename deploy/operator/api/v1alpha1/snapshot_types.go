@@ -18,6 +18,7 @@
 package v1alpha1
 
 import (
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -31,6 +32,16 @@ const (
 	// SnapshotConditionFailed is True when capture or binding failed terminally.
 	SnapshotConditionFailed = "Failed"
 )
+
+// IsSnapshotSucceeded reports whether the Snapshot's Ready condition is True.
+func IsSnapshotSucceeded(s *Snapshot) bool {
+	return meta.IsStatusConditionTrue(s.Status.Conditions, SnapshotConditionReady)
+}
+
+// IsSnapshotFailed reports whether the Snapshot's Failed condition is True.
+func IsSnapshotFailed(s *Snapshot) bool {
+	return meta.IsStatusConditionTrue(s.Status.Conditions, SnapshotConditionFailed)
+}
 
 // SnapshotSpec defines the desired state of Snapshot.
 //

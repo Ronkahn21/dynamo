@@ -18,9 +18,20 @@
 package v1alpha1
 
 import (
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
+
+// IsSnapshotContentSucceeded reports whether the SnapshotContent's Ready condition is True.
+func IsSnapshotContentSucceeded(c *SnapshotContent) bool {
+	return meta.IsStatusConditionTrue(c.Status.Conditions, SnapshotConditionReady)
+}
+
+// IsSnapshotContentFailed reports whether the SnapshotContent's Failed condition is True.
+func IsSnapshotContentFailed(c *SnapshotContent) bool {
+	return meta.IsStatusConditionTrue(c.Status.Conditions, SnapshotConditionFailed)
+}
 
 // SnapshotContentSpec defines the desired state of SnapshotContent. It is
 // populated by the SnapshotReconciler (operator) at creation time and is
