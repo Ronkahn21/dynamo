@@ -18,9 +18,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	k8sfake "k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	crfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -402,4 +404,165 @@ func TestRunCheckpoint_WritesFailedOnError(t *testing.T) {
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "CheckpointFailed", cond.Reason)
+}
+
+// mustUnstructured converts a typed object to the *unstructured.Unstructured the dynamic informer
+// (and thus the podRef index) stores.
+func mustUnstructured(t *testing.T, obj runtime.Object) *unstructured.Unstructured {
+	t.Helper()
+	m, err := runtime.DefaultUnstructuredConverter.ToUnstructured(obj)
+	require.NoError(t, err)
+	return &unstructured.Unstructured{Object: m}
+}
+
+// contentForWorker0 builds a SnapshotContent referencing pod inference/worker-0 with a given
+// creation time, optionally carrying a terminal condition (SnapshotConditionReady/Failed).
+func contentForWorker0(name string, created metav1.Time, terminal string) *nvidiacomv1alpha1.SnapshotContent {
+	c := &nvidiacomv1alpha1.SnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: name, CreationTimestamp: created},
+		Spec: nvidiacomv1alpha1.SnapshotContentSpec{
+			SnapshotRef: nvidiacomv1alpha1.SnapshotReference{Namespace: "inference", Name: "snapshot-" + name},
+			Source:      nvidiacomv1alpha1.SnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0", UID: types.UID("pod-uid")}, NodeName: "node-a"},
+		},
+	}
+	if terminal != "" {
+		meta.SetStatusCondition(&c.Status.Conditions, metav1.Condition{Type: terminal, Status: metav1.ConditionTrue, Reason: "Done"})
+	}
+	return c
+}
+
+func TestPodRefIndexFunc(t *testing.T) {
+	keys, err := podRefIndexFunc(mustUnstructured(t, contentForWorker0("snapshotcontent-abc", metav1.Unix(1000, 0), "")))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"inference/worker-0"}, keys)
+}
+
+func TestPodRefIndexFunc_MissingFieldsOrWrongType(t *testing.T) {
+	keys, err := podRefIndexFunc(&unstructured.Unstructured{Object: map[string]interface{}{"spec": map[string]interface{}{}}})
+	require.NoError(t, err)
+	assert.Nil(t, keys)
+
+	keys, err = podRefIndexFunc("not-unstructured")
+	require.NoError(t, err)
+	assert.Nil(t, keys)
+}
+
+func TestContentFromInformerObj(t *testing.T) {
+	u := mustUnstructured(t, contentForWorker0("snapshotcontent-abc", metav1.Unix(1000, 0), ""))
+
+	c, ok := contentFromInformerObj(u)
+	require.True(t, ok)
+	assert.Equal(t, "snapshotcontent-abc", c.Name)
+
+	c, ok = contentFromInformerObj(cache.DeletedFinalStateUnknown{Key: "k", Obj: u})
+	require.True(t, ok)
+	assert.Equal(t, "snapshotcontent-abc", c.Name)
+
+	_, ok = contentFromInformerObj(cache.DeletedFinalStateUnknown{Key: "k", Obj: "bad"})
+	assert.False(t, ok)
+	_, ok = contentFromInformerObj("bad")
+	assert.False(t, ok)
+}
+
+func TestChooseActiveContent_OldestNonTerminalWins(t *testing.T) {
+	// "snapshotcontent-a" sorts first by name but is newer; oldest-by-CreationTimestamp must win.
+	newer := mustUnstructured(t, contentForWorker0("snapshotcontent-a", metav1.Unix(2000, 0), ""))
+	older := mustUnstructured(t, contentForWorker0("snapshotcontent-b", metav1.Unix(1000, 0), ""))
+	assert.Equal(t, "snapshotcontent-b", chooseActiveContent([]interface{}{newer, older}))
+}
+
+func TestChooseActiveContent_SkipsTerminalAndTieBreaksByName(t *testing.T) {
+	terminal := mustUnstructured(t, contentForWorker0("snapshotcontent-old", metav1.Unix(1000, 0), nvidiacomv1alpha1.SnapshotConditionReady))
+	tieA := mustUnstructured(t, contentForWorker0("snapshotcontent-a", metav1.Unix(2000, 0), ""))
+	tieB := mustUnstructured(t, contentForWorker0("snapshotcontent-b", metav1.Unix(2000, 0), ""))
+	assert.Equal(t, "snapshotcontent-a", chooseActiveContent([]interface{}{terminal, tieB, tieA}))
+}
+
+func TestChooseActiveContent_AllTerminalReturnsEmpty(t *testing.T) {
+	ready := mustUnstructured(t, contentForWorker0("snapshotcontent-a", metav1.Unix(1000, 0), nvidiacomv1alpha1.SnapshotConditionReady))
+	failed := mustUnstructured(t, contentForWorker0("snapshotcontent-b", metav1.Unix(2000, 0), nvidiacomv1alpha1.SnapshotConditionFailed))
+	assert.Equal(t, "", chooseActiveContent([]interface{}{ready, failed}))
+}
+
+// podWithFailedSibling builds the inference/worker-0 source pod with the target Running and a
+// sibling Terminated non-zero, so a reconcile triggers the unstick.
+func podWithFailedSibling() *corev1.Pod {
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "worker-0",
+			Namespace:   "inference",
+			UID:         types.UID("pod-uid"),
+			Labels:      map[string]string{snapshotprotocol.CheckpointIDLabel: "abc"},
+			Annotations: map[string]string{snapshotprotocol.TargetContainersAnnotation: "main"},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-a"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "main", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}, ContainerID: "containerd://main-id"},
+				{Name: "helper", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}}, ContainerID: "containerd://helper-id"},
+			},
+		},
+	}
+}
+
+func seedIndex(t *testing.T, contents ...*nvidiacomv1alpha1.SnapshotContent) cache.Indexer {
+	t.Helper()
+	idx := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
+	for _, c := range contents {
+		require.NoError(t, idx.Add(mustUnstructured(t, c)))
+	}
+	return idx
+}
+
+func TestEnqueueContentForSourcePod_TriggersUnstick(t *testing.T) {
+	content := makeWorkOrder("snapshotcontent-abc", "node-a", "abc")
+	content.CreationTimestamp = metav1.Unix(1000, 0)
+	pod := podWithFailedSibling()
+	fc := &fakeCheckpointer{}
+	rt := &fakeRuntime{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = rt
+	w.contentIndexer = seedIndex(t, content)
+
+	w.enqueueContentForSourcePod(context.Background(), pod)
+
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "CheckpointContainerFailed", cond.Reason)
+	assert.Equal(t, []string{"main-id"}, rt.resolvedContainerIDs)
+	assert.False(t, fc.wasCalled())
+}
+
+func TestEnqueueContentForSourcePod_PodNotIndexedNoOp(t *testing.T) {
+	content := makeWorkOrder("snapshotcontent-abc", "node-a", "abc")
+	pod := podWithFailedSibling()
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	w.contentIndexer = seedIndex(t) // empty index
+
+	w.enqueueContentForSourcePod(context.Background(), pod)
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
+func TestEnqueueContentForSourcePod_OtherNodeNoOp(t *testing.T) {
+	content := makeWorkOrder("snapshotcontent-abc", "node-a", "abc")
+	pod := podWithFailedSibling()
+	pod.Spec.NodeName = "node-b"
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	w.contentIndexer = seedIndex(t, content)
+
+	w.enqueueContentForSourcePod(context.Background(), pod)
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
+}
+
+func TestEnqueueContentForSourcePod_IndexErrorNoOp(t *testing.T) {
+	content := makeWorkOrder("snapshotcontent-abc", "node-a", "abc")
+	pod := podWithFailedSibling()
+	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+	// Indexer without podRefIndex registered → ByIndex returns an error; enqueue must log and no-op.
+	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+
+	w.enqueueContentForSourcePod(context.Background(), pod)
+	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
