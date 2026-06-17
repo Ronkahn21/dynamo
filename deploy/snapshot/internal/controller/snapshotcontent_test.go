@@ -176,6 +176,55 @@ func TestReconcileSnapshotContent_MissingCheckpointIDFails(t *testing.T) {
 	assert.Equal(t, "MissingCheckpointID", cond.Reason)
 }
 
+func TestReconcileSnapshotContent_FailedContainerUnsticksAndFails(t *testing.T) {
+	content := makeWorkOrder("snapshotcontent-abc", "node-a", "abc")
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "worker-0",
+			Namespace:   "inference",
+			UID:         types.UID("pod-uid"),
+			Labels:      map[string]string{snapshotprotocol.CheckpointIDLabel: "abc"},
+			Annotations: map[string]string{snapshotprotocol.TargetContainersAnnotation: "main"},
+		},
+		Spec: corev1.PodSpec{NodeName: "node-a"},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "main", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}, ContainerID: "containerd://main-id"},
+				{Name: "helper", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}}, ContainerID: "containerd://helper-id"},
+			},
+		},
+	}
+	fc := &fakeCheckpointer{}
+	rt := &fakeRuntime{} // PID 0 → ResolveContainer errors → SendSignalToPID skipped (no real signal sent)
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = rt
+
+	w.reconcileSnapshotContent(context.Background(), content.Name)
+
+	got := getContent(t, w, content.Name)
+	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "CheckpointContainerFailed", cond.Reason)
+	assert.Contains(t, cond.Message, "helper")
+	assert.True(t, sawEventReason(w.clientset.(*k8sfake.Clientset), "CheckpointFailed"))
+	// Only the still-running sibling is resolved for the SIGKILL; the dead container is skipped.
+	assert.Equal(t, []string{"main-id"}, rt.resolvedContainerIDs)
+	assert.False(t, fc.wasCalled())
+	assert.Empty(t, w.inFlight)
+}
+
+func TestFailCheckpointOnContainerExit_IgnoresCleanExit(t *testing.T) {
+	w := makeNodeController(t, &fakeCheckpointer{})
+	pod := &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
+		{Name: "main", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+		{Name: "helper", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}}},
+	}}}
+
+	handled := w.failCheckpointOnContainerExit(context.Background(), &nvidiacomv1alpha1.SnapshotContent{}, pod)
+	assert.False(t, handled)
+}
+
 func TestReconcileSnapshotContent_OpaqueNameUsesPodLabel(t *testing.T) {
 	// The work order name does not encode the pod's checkpoint id: the name is opaque and the
 	// pod label is the sole source of truth. Capture must proceed using the pod label ("abc").

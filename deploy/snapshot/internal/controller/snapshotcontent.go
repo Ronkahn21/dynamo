@@ -5,6 +5,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -86,6 +87,14 @@ func (w *NodeController) reconcileSnapshotContent(ctx context.Context, name stri
 
 	pod, ok := w.resolveSourcePod(ctx, content)
 	if !ok {
+		return
+	}
+
+	// Active unstick: if any checkpoint container has already exited non-zero, force-terminate
+	// the pod's still-running containers so a quiesced/CUDA-locked workload cannot hang forever,
+	// and fail the work order. This runs while we hold the in-flight key, so it can never race a
+	// live dump (a dump in flight means tryAcquire above would have returned).
+	if w.failCheckpointOnContainerExit(ctx, content, pod) {
 		return
 	}
 
@@ -224,6 +233,58 @@ func (w *NodeController) resolveSourcePod(ctx context.Context, content *nvidiaco
 		return nil, false
 	}
 	return pod, true
+}
+
+// failCheckpointOnContainerExit fails the work order and force-terminates the source pod's
+// still-running containers when any checkpoint container has terminated non-zero. It returns
+// true when a failure was handled and the caller must stop. Init containers
+// (pod.Status.InitContainerStatuses) are intentionally out of scope.
+func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *nvidiacomv1alpha1.SnapshotContent, pod *corev1.Pod) bool {
+	var failed *corev1.ContainerStatus
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if cs.State.Terminated != nil && cs.State.Terminated.ExitCode != 0 {
+			failed = cs
+			break
+		}
+	}
+	if failed == nil {
+		return false
+	}
+
+	term := failed.State.Terminated
+	message := fmt.Sprintf("checkpoint container %q terminated with exit code %d", failed.Name, term.ExitCode)
+	if term.Reason != "" {
+		message = fmt.Sprintf("%s: %s", message, term.Reason)
+	}
+	logger := w.log.WithValues("content", content.Name, "container", failed.Name)
+	logger.Info("Checkpoint container failed", "exit_code", term.ExitCode, "reason", term.Reason)
+	emitPodEvent(ctx, w.clientset, logger, pod, "snapshot", corev1.EventTypeWarning, "CheckpointFailed", message)
+	w.killRunningContainers(ctx, logger, pod, fmt.Sprintf("checkpoint container %s failed", failed.Name))
+	w.writeFailed(ctx, content, "CheckpointContainerFailed", errors.New(message))
+	return true
+}
+
+// killRunningContainers SIGKILLs every still-running container in the pod, resolving each
+// container's host PID through the node runtime. Best-effort: resolution and signal errors are
+// logged and skipped so one stuck container does not block terminating the rest.
+func (w *NodeController) killRunningContainers(ctx context.Context, logger logr.Logger, pod *corev1.Pod, reason string) {
+	for _, cs := range pod.Status.ContainerStatuses {
+		if cs.State.Running == nil || cs.ContainerID == "" {
+			continue
+		}
+		containerID := snapshotruntime.StripCRIScheme(cs.ContainerID)
+		resolveCtx, cancel := context.WithTimeout(ctx, containerResolveAttemptTimeout)
+		pid, _, err := w.runtime.ResolveContainer(resolveCtx, containerID)
+		cancel()
+		if err != nil {
+			logger.Error(err, "Failed to resolve running checkpoint container", "container", cs.Name)
+			continue
+		}
+		if err := snapshotruntime.SendSignalToPID(logger, pid, syscall.SIGKILL, reason); err != nil {
+			logger.Error(err, "Failed to signal running checkpoint container", "container", cs.Name)
+		}
+	}
 }
 
 // writeReady patches status with the Ready condition.
