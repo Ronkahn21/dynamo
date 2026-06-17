@@ -89,18 +89,12 @@ func (w *NodeController) reconcileSnapshotContent(ctx context.Context, name stri
 		return
 	}
 
-	// Capture parameters come from the source pod. The checkpoint ID is the pod label, and it
-	// must agree with the ID embedded in the work order name (snapshotcontent-<checkpointID>).
+	// Capture parameters come from the source pod, which is the single source of truth. The
+	// checkpoint ID is the pod label; the work order name is treated as opaque (never parsed).
 	id := strings.TrimSpace(pod.Labels[snapshotprotocol.CheckpointIDLabel])
 	if id == "" {
 		w.writeFailed(ctx, content, "MissingCheckpointID",
 			fmt.Errorf("source pod %q missing %s label", pod.Name, snapshotprotocol.CheckpointIDLabel))
-		return
-	}
-	expected := strings.TrimPrefix(content.Name, "snapshotcontent-")
-	if id != expected {
-		w.writeFailed(ctx, content, "CheckpointIDMismatch",
-			fmt.Errorf("source pod checkpoint id %q does not match work order id %q", id, expected))
 		return
 	}
 

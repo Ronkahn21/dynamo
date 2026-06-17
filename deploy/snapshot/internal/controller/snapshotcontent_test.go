@@ -176,17 +176,25 @@ func TestReconcileSnapshotContent_MissingCheckpointIDFails(t *testing.T) {
 	assert.Equal(t, "MissingCheckpointID", cond.Reason)
 }
 
-func TestReconcileSnapshotContent_CheckpointIDMismatchFails(t *testing.T) {
-	// Work order name embeds "abc" but the source pod label says "xyz".
-	content := makeWorkOrder("snapshotcontent-abc", "node-a", "abc")
-	pod := makeSourcePod("xyz")
-	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
+func TestReconcileSnapshotContent_OpaqueNameUsesPodLabel(t *testing.T) {
+	// The work order name does not encode the pod's checkpoint id: the name is opaque and the
+	// pod label is the sole source of truth. Capture must proceed using the pod label ("abc").
+	content := makeWorkOrder("snapshotcontent-unrelated-name", "node-a", "abc")
+	pod := makeSourcePod("abc")
+	fc := &fakeCheckpointer{}
+	w := makeNodeController(t, fc, content, pod)
+	w.runtime = &fakeRuntime{resolveContainerPID: 7}
 
 	w.reconcileSnapshotContent(context.Background(), content.Name)
+	require.Eventually(t, fc.wasCalled, time.Second, 5*time.Millisecond)
+
+	// The checkpoint id and destination come from the pod label, not the work order name.
+	params := fc.lastParams()
+	assert.Equal(t, "abc", params.CheckpointID)
+	assert.Equal(t, filepath.Join(w.config.Storage.BasePath, "abc", "versions", "1"), params.HostPath)
+
 	got := getContent(t, w, content.Name)
-	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
-	require.NotNil(t, cond)
-	assert.Equal(t, "CheckpointIDMismatch", cond.Reason)
+	require.NotNil(t, meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionReady))
 }
 
 func TestReconcileSnapshotContent_ResumeWritesReady(t *testing.T) {
