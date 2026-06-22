@@ -227,6 +227,7 @@ rules:
   - dynamographdeployments
   - dynamographdeploymentscalingadapters
   - dynamomodels
+  - snapshotcontents
   - snapshots
   verbs:
   - create
@@ -244,6 +245,7 @@ rules:
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
+  - snapshots/finalizers
   verbs:
   - update
 - apiGroups:
@@ -255,6 +257,8 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
+  - snapshotcontents/status
+  - snapshots/status
   verbs:
   - get
   - patch

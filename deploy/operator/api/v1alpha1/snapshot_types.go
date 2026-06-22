@@ -18,7 +18,9 @@
 package v1alpha1
 
 import (
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 )
 
 // Snapshot and SnapshotContent status condition types. Both objects share this
@@ -31,23 +33,18 @@ const (
 	SnapshotConditionFailed = "Failed"
 )
 
-// SnapshotSpec defines the desired state of Snapshot.
-//
-// Minimal "trigger" shape: it names what to capture (an existing pod) and the
-// artifact identity (CheckpointID). Capture parameters the node agent needs at
-// dump time (target container, storage base path) are read from the referenced
-// pod's existing annotations and mounts, not duplicated here. The spec is
-// immutable after creation.
-type SnapshotSpec struct {
-	// CheckpointID is the stable artifact identity and the on-PVC artifact
-	// subdirectory name (<basePath>/<checkpointID>/versions/<version>/). It is
-	// the primary key of the storage contract shared with the restore path and
-	// is immutable after creation.
-	// +kubebuilder:validation:Required
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=253
-	CheckpointID string `json:"checkpointID"`
+// IsSnapshotSucceeded reports whether the Snapshot's Ready condition is True.
+func IsSnapshotSucceeded(s *Snapshot) bool {
+	return meta.IsStatusConditionTrue(s.Status.Conditions, SnapshotConditionReady)
+}
 
+// IsSnapshotFailed reports whether the Snapshot's Failed condition is True.
+func IsSnapshotFailed(s *Snapshot) bool {
+	return meta.IsStatusConditionTrue(s.Status.Conditions, SnapshotConditionFailed)
+}
+
+// SnapshotSpec defines the desired state of Snapshot.
+type SnapshotSpec struct {
 	// Source identifies the captured workload. It is a struct (rather than an
 	// inlined reference) so future source variants can be added additively.
 	// +kubebuilder:validation:Required
@@ -69,6 +66,11 @@ type PodReference struct {
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinLength=1
 	Name string `json:"name"`
+
+	// UID of the source pod, recorded so the node agent dumps that specific
+	// pod and not a same-named recreation.
+	// +optional
+	UID types.UID `json:"uid,omitempty"`
 }
 
 // SnapshotStatus defines the observed state of Snapshot.
@@ -88,7 +90,6 @@ type SnapshotStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=snap
-// +kubebuilder:printcolumn:name="CheckpointID",type="string",JSONPath=".spec.checkpointID",description="Artifact identity"
 // +kubebuilder:printcolumn:name="Content",type="string",JSONPath=".status.boundSnapshotContentName",description="Bound SnapshotContent"
 // +kubebuilder:printcolumn:name="Ready",type="string",JSONPath=".status.conditions[?(@.type=='Ready')].status",description="Ready condition"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"

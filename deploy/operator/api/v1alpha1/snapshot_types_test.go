@@ -46,8 +46,7 @@ func TestSnapshotDeepCopyIsIndependent(t *testing.T) {
 	original := &Snapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-a", Namespace: "inference"},
 		Spec: SnapshotSpec{
-			CheckpointID: "abc123",
-			Source:       SnapshotSource{PodRef: PodReference{Name: "worker-0"}},
+			Source: SnapshotSource{PodRef: PodReference{Name: "worker-0"}},
 		},
 		Status: SnapshotStatus{
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Captured"}},
@@ -59,10 +58,10 @@ func TestSnapshotDeepCopyIsIndependent(t *testing.T) {
 		t.Fatalf("DeepCopy is not equal to original")
 	}
 
-	clone.Spec.CheckpointID = "mutated"
+	clone.Spec.Source.PodRef.Name = "mutated"
 	clone.Status.Conditions[0].Reason = "Changed"
-	if original.Spec.CheckpointID != "abc123" {
-		t.Errorf("mutating clone spec changed original: got %q", original.Spec.CheckpointID)
+	if original.Spec.Source.PodRef.Name != "worker-0" {
+		t.Errorf("mutating clone spec changed original: got %q", original.Spec.Source.PodRef.Name)
 	}
 	if original.Status.Conditions[0].Reason != "Captured" {
 		t.Errorf("mutating clone condition changed original: got %q", original.Status.Conditions[0].Reason)
@@ -76,7 +75,10 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "content-a"},
 		Spec: SnapshotContentSpec{
 			SnapshotRef: SnapshotReference{Namespace: "inference", Name: "snap-a", UID: types.UID("uid-1")},
-			Source:      SnapshotContentSource{SnapshotHandle: "pvc://inference/ckpt-pvc/checkpoints/abc123/versions/1"},
+			Source: SnapshotContentSource{
+				PodRef:   PodReference{Name: "worker-0", UID: types.UID("pod-uid-1")},
+				NodeName: "node-a",
+			},
 		},
 		Status: SnapshotContentStatus{
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Bound"}},
@@ -88,10 +90,10 @@ func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
 		t.Fatalf("DeepCopy is not equal to original")
 	}
 
-	clone.Spec.Source.SnapshotHandle = "mutated"
+	clone.Spec.Source.PodRef.Name = "mutated"
 	clone.Status.Conditions[0].Reason = "Changed"
-	if original.Spec.Source.SnapshotHandle != "pvc://inference/ckpt-pvc/checkpoints/abc123/versions/1" {
-		t.Errorf("mutating clone changed original handle: got %q", original.Spec.Source.SnapshotHandle)
+	if original.Spec.Source.PodRef.Name != "worker-0" {
+		t.Errorf("mutating clone changed original podRef name: got %q", original.Spec.Source.PodRef.Name)
 	}
 	if original.Status.Conditions[0].Reason != "Bound" {
 		t.Errorf("mutating clone condition changed original: got %q", original.Status.Conditions[0].Reason)

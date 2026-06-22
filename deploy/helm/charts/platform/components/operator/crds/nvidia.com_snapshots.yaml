@@ -21,10 +21,6 @@ spec:
   scope: Namespaced
   versions:
     - additionalPrinterColumns:
-        - description: Artifact identity
-          jsonPath: .spec.checkpointID
-          name: CheckpointID
-          type: string
         - description: Bound SnapshotContent
           jsonPath: .status.boundSnapshotContentName
           name: Content
@@ -64,21 +60,12 @@ spec:
               description: |-
                 SnapshotSpec defines the desired state of Snapshot.
 
-                Minimal "trigger" shape: it names what to capture (an existing pod) and the
-                artifact identity (CheckpointID). Capture parameters the node agent needs at
-                dump time (target container, storage base path) are read from the referenced
-                pod's existing annotations and mounts, not duplicated here. The spec is
-                immutable after creation.
+                Minimal "trigger" shape: it names what to capture (an existing pod). All
+                capture parameters the node agent needs at dump time (checkpoint ID, target
+                container, storage base path) are read from the referenced pod's existing
+                labels/annotations and mounts, not duplicated here. The spec is immutable
+                after creation.
               properties:
-                checkpointID:
-                  description: |-
-                    CheckpointID is the stable artifact identity and the on-PVC artifact
-                    subdirectory name (<basePath>/<checkpointID>/versions/<version>/). It is
-                    the primary key of the storage contract shared with the restore path and
-                    is immutable after creation.
-                  maxLength: 253
-                  minLength: 1
-                  type: string
                 source:
                   description: |-
                     Source identifies the captured workload. It is a struct (rather than an
@@ -94,6 +81,11 @@ spec:
                           description: Name of the source pod.
                           minLength: 1
                           type: string
+                        uid:
+                          description: |-
+                            UID of the source pod, recorded so the node agent dumps that specific
+                            pod and not a same-named recreation.
+                          type: string
                       required:
                         - name
                       type: object
@@ -101,7 +93,6 @@ spec:
                     - podRef
                   type: object
               required:
-                - checkpointID
                 - source
               type: object
             status:
