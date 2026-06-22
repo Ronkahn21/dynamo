@@ -47,25 +47,25 @@ func snapshotReconcilerScheme() *runtime.Scheme {
 	return s
 }
 
-func makeSnapshotReconciler(s *runtime.Scheme, objs ...client.Object) *SnapshotReconciler {
-	return &SnapshotReconciler{
+func makeSnapshotReconciler(s *runtime.Scheme, objs ...client.Object) *PodSnapshotReconciler {
+	return &PodSnapshotReconciler{
 		Client: fake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
-			WithStatusSubresource(&nvidiacomv1alpha1.Snapshot{}, &nvidiacomv1alpha1.SnapshotContent{}).Build(),
+			WithStatusSubresource(&nvidiacomv1alpha1.PodSnapshot{}, &nvidiacomv1alpha1.PodSnapshotContent{}).Build(),
 		Recorder: record.NewFakeRecorder(10),
 	}
 }
 
-func makeSnapshotForReconcile(checkpointID, podName string) *nvidiacomv1alpha1.Snapshot {
-	return &nvidiacomv1alpha1.Snapshot{
+func makeSnapshotForReconcile(checkpointID, podName string) *nvidiacomv1alpha1.PodSnapshot {
+	return &nvidiacomv1alpha1.PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:       "snapshot-" + checkpointID,
+			Name:       "podsnapshot-" + checkpointID,
 			Namespace:  "inference",
 			UID:        types.UID("snap-uid"),
-			Finalizers: []string{snapshotFinalizer},
+			Finalizers: []string{podSnapshotFinalizer},
 			Labels:     map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
 		},
-		Spec: nvidiacomv1alpha1.SnapshotSpec{
-			Source: nvidiacomv1alpha1.SnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: podName}},
+		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
+			Source: nvidiacomv1alpha1.PodSnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: podName}},
 		},
 	}
 }
@@ -77,7 +77,7 @@ func scheduledPod(name, node string) *corev1.Pod {
 	}
 }
 
-func reconcileSnapshot(t *testing.T, r *SnapshotReconciler, name string) ctrl.Result {
+func reconcileSnapshot(t *testing.T, r *PodSnapshotReconciler, name string) ctrl.Result {
 	t.Helper()
 	res, err := r.Reconcile(context.Background(),
 		ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "inference", Name: name}})
@@ -94,7 +94,7 @@ func TestSnapshotReconciler_PodUnscheduledBacksOff(t *testing.T) {
 	res := reconcileSnapshot(t, r, snap.Name)
 	assert.Positive(t, res.RequeueAfter)
 
-	var contents nvidiacomv1alpha1.SnapshotContentList
+	var contents nvidiacomv1alpha1.PodSnapshotContentList
 	require.NoError(t, r.List(context.Background(), &contents))
 	assert.Empty(t, contents.Items)
 }
@@ -106,8 +106,8 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 
 	reconcileSnapshot(t, r, snap.Name)
 
-	content := &nvidiacomv1alpha1.SnapshotContent{}
-	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "snapshotcontent-abc123"}, content))
+	content := &nvidiacomv1alpha1.PodSnapshotContent{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "podsnapshotcontent-abc123"}, content))
 	assert.Equal(t, "worker-0", content.Spec.Source.PodRef.Name)
 	assert.Equal(t, types.UID("pod-uid-9"), content.Spec.Source.PodRef.UID)
 	assert.Equal(t, "node-a", content.Spec.Source.NodeName)
@@ -115,13 +115,13 @@ func TestSnapshotReconciler_BuildsWorkOrderAndBinds(t *testing.T) {
 	assert.NotContains(t, content.Labels, snapshotprotocol.CheckpointIDLabel)
 	assert.NotContains(t, content.Annotations, snapshotprotocol.CheckpointArtifactVersionAnnotation)
 	assert.Empty(t, content.Finalizers)
-	assert.Equal(t, "inference", content.Spec.SnapshotRef.Namespace)
-	assert.Equal(t, snap.Name, content.Spec.SnapshotRef.Name)
+	assert.Equal(t, "inference", content.Spec.PodSnapshotRef.Namespace)
+	assert.Equal(t, snap.Name, content.Spec.PodSnapshotRef.Name)
 
-	updated := &nvidiacomv1alpha1.Snapshot{}
+	updated := &nvidiacomv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
-	require.NotNil(t, updated.Status.BoundSnapshotContentName)
-	assert.Equal(t, "snapshotcontent-abc123", *updated.Status.BoundSnapshotContentName)
+	require.NotNil(t, updated.Status.BoundPodSnapshotContentName)
+	assert.Equal(t, "podsnapshotcontent-abc123", *updated.Status.BoundPodSnapshotContentName)
 }
 
 func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
@@ -130,21 +130,21 @@ func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 		condType  string
 		wantReady metav1.ConditionStatus
 	}{
-		{name: "ready", condType: nvidiacomv1alpha1.SnapshotConditionReady},
-		{name: "failed", condType: nvidiacomv1alpha1.SnapshotConditionFailed},
+		{name: "ready", condType: nvidiacomv1alpha1.PodSnapshotConditionReady},
+		{name: "failed", condType: nvidiacomv1alpha1.PodSnapshotConditionFailed},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := snapshotReconcilerScheme()
 			snap := makeSnapshotForReconcile("abc123", "worker-0")
-			content := &nvidiacomv1alpha1.SnapshotContent{
-				ObjectMeta: metav1.ObjectMeta{Name: "snapshotcontent-abc123", Finalizers: []string{snapshotFinalizer}},
-				Spec: nvidiacomv1alpha1.SnapshotContentSpec{
-					SnapshotRef: nvidiacomv1alpha1.SnapshotReference{Namespace: "inference", Name: snap.Name},
-					Source: nvidiacomv1alpha1.SnapshotContentSource{
+			content := &nvidiacomv1alpha1.PodSnapshotContent{
+				ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-abc123", Finalizers: []string{podSnapshotFinalizer}},
+				Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+					PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name},
+					Source: nvidiacomv1alpha1.PodSnapshotContentSource{
 						PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}, NodeName: "node-a",
 					},
 				},
-				Status: nvidiacomv1alpha1.SnapshotContentStatus{
+				Status: nvidiacomv1alpha1.PodSnapshotContentStatus{
 					Conditions: []metav1.Condition{{Type: tc.condType, Status: metav1.ConditionTrue, Reason: "Agent", Message: "done"}},
 				},
 			}
@@ -152,7 +152,7 @@ func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 
 			reconcileSnapshot(t, r, snap.Name)
 
-			updated := &nvidiacomv1alpha1.Snapshot{}
+			updated := &nvidiacomv1alpha1.PodSnapshot{}
 			require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
 			cond := meta.FindStatusCondition(updated.Status.Conditions, tc.condType)
 			require.NotNil(t, cond)
@@ -164,11 +164,11 @@ func TestSnapshotReconciler_MirrorsReadyAndFailed(t *testing.T) {
 func TestSnapshotReconciler_RescheduleFailsSnapshot(t *testing.T) {
 	s := snapshotReconcilerScheme()
 	snap := makeSnapshotForReconcile("abc123", "worker-0")
-	content := &nvidiacomv1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "snapshotcontent-abc123", Finalizers: []string{snapshotFinalizer}},
-		Spec: nvidiacomv1alpha1.SnapshotContentSpec{
-			SnapshotRef: nvidiacomv1alpha1.SnapshotReference{Namespace: "inference", Name: snap.Name},
-			Source:      nvidiacomv1alpha1.SnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}, NodeName: "node-a"},
+	content := &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-abc123", Finalizers: []string{podSnapshotFinalizer}},
+		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name},
+			Source:      nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}, NodeName: "node-a"},
 		},
 	}
 	// Pod now runs on a different node than the bound content.
@@ -176,9 +176,9 @@ func TestSnapshotReconciler_RescheduleFailsSnapshot(t *testing.T) {
 
 	reconcileSnapshot(t, r, snap.Name)
 
-	updated := &nvidiacomv1alpha1.Snapshot{}
+	updated := &nvidiacomv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
-	cond := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
+	cond := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, metav1.ConditionTrue, cond.Status)
 	assert.Equal(t, "PodRescheduled", cond.Reason)
@@ -192,9 +192,9 @@ func TestSnapshotReconciler_MissingCheckpointIDLabelFails(t *testing.T) {
 
 	reconcileSnapshot(t, r, snap.Name)
 
-	updated := &nvidiacomv1alpha1.Snapshot{}
+	updated := &nvidiacomv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, updated))
-	cond := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
+	cond := meta.FindStatusCondition(updated.Status.Conditions, nvidiacomv1alpha1.PodSnapshotConditionFailed)
 	require.NotNil(t, cond)
 	assert.Equal(t, "MissingCheckpointID", cond.Reason)
 }
@@ -209,10 +209,10 @@ func TestSnapshotReconciler_DeleteWithoutLabelDropsFinalizer(t *testing.T) {
 
 	reconcileSnapshot(t, r, snap.Name)
 
-	gone := &nvidiacomv1alpha1.Snapshot{}
+	gone := &nvidiacomv1alpha1.PodSnapshot{}
 	err := r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, gone)
 	if err == nil {
-		assert.False(t, controllerutil.ContainsFinalizer(gone, snapshotFinalizer))
+		assert.False(t, controllerutil.ContainsFinalizer(gone, podSnapshotFinalizer))
 	} else {
 		assert.True(t, apierrors.IsNotFound(err))
 	}
@@ -223,45 +223,45 @@ func TestSnapshotReconciler_CascadeDelete(t *testing.T) {
 	now := metav1.Now()
 	snap := makeSnapshotForReconcile("abc123", "worker-0")
 	snap.DeletionTimestamp = &now
-	content := &nvidiacomv1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "snapshotcontent-abc123"},
-		Spec: nvidiacomv1alpha1.SnapshotContentSpec{
-			SnapshotRef: nvidiacomv1alpha1.SnapshotReference{Namespace: "inference", Name: snap.Name},
-			Source:      nvidiacomv1alpha1.SnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}, NodeName: "node-a"},
+	content := &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-abc123"},
+		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: snap.Name},
+			Source:      nvidiacomv1alpha1.PodSnapshotContentSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "worker-0"}, NodeName: "node-a"},
 		},
 	}
 	r := makeSnapshotReconciler(s, snap, content)
 
 	// The content carries no finalizer, so it is deleted immediately; one pass deletes
-	// the content and, once confirmed gone, drops the Snapshot finalizer.
+	// the content and, once confirmed gone, drops the PodSnapshot finalizer.
 	reconcileSnapshot(t, r, snap.Name)
-	err := r.Get(context.Background(), types.NamespacedName{Name: "snapshotcontent-abc123"}, &nvidiacomv1alpha1.SnapshotContent{})
+	err := r.Get(context.Background(), types.NamespacedName{Name: "podsnapshotcontent-abc123"}, &nvidiacomv1alpha1.PodSnapshotContent{})
 	assert.True(t, apierrors.IsNotFound(err))
 
-	gone := &nvidiacomv1alpha1.Snapshot{}
+	gone := &nvidiacomv1alpha1.PodSnapshot{}
 	err = r.Get(context.Background(), types.NamespacedName{Namespace: "inference", Name: snap.Name}, gone)
 	if err == nil {
-		assert.False(t, controllerutil.ContainsFinalizer(gone, snapshotFinalizer))
+		assert.False(t, controllerutil.ContainsFinalizer(gone, podSnapshotFinalizer))
 	} else {
 		assert.True(t, apierrors.IsNotFound(err))
 	}
 }
 
 func TestSnapshotContentToSnapshot_UnwrapsTombstone(t *testing.T) {
-	content := &nvidiacomv1alpha1.SnapshotContent{
-		ObjectMeta: metav1.ObjectMeta{Name: "snapshotcontent-abc123"},
-		Spec: nvidiacomv1alpha1.SnapshotContentSpec{
-			SnapshotRef: nvidiacomv1alpha1.SnapshotReference{Namespace: "inference", Name: "snapshot-abc123"},
+	content := &nvidiacomv1alpha1.PodSnapshotContent{
+		ObjectMeta: metav1.ObjectMeta{Name: "podsnapshotcontent-abc123"},
+		Spec: nvidiacomv1alpha1.PodSnapshotContentSpec{
+			PodSnapshotRef: nvidiacomv1alpha1.PodSnapshotReference{Namespace: "inference", Name: "podsnapshot-abc123"},
 		},
 	}
 
-	direct := snapshotContentToSnapshot(context.Background(), content)
+	direct := podSnapshotContentToPodSnapshot(context.Background(), content)
 	require.Len(t, direct, 1)
-	assert.Equal(t, "snapshot-abc123", direct[0].Name)
+	assert.Equal(t, "podsnapshot-abc123", direct[0].Name)
 
-	tombstone := cache.DeletedFinalStateUnknown{Key: "snapshotcontent-abc123", Obj: content}
-	ref, ok := snapshotRefFromContentObj(tombstone)
+	tombstone := cache.DeletedFinalStateUnknown{Key: "podsnapshotcontent-abc123", Obj: content}
+	ref, ok := podSnapshotRefFromContentObj(tombstone)
 	require.True(t, ok)
-	assert.Equal(t, "snapshot-abc123", ref.Name)
+	assert.Equal(t, "podsnapshot-abc123", ref.Name)
 	assert.Equal(t, "inference", ref.Namespace)
 }

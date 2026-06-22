@@ -62,7 +62,7 @@ func (r *CheckpointReconciler) GetRecorder() record.EventRecorder {
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=nvidia.com,resources=snapshots,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=nvidia.com,resources=podsnapshots,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamocheckpoints/finalizers,verbs=update
 // +kubebuilder:rbac:groups=batch,resources=jobs,verbs=get;list;watch;create;update;patch;delete
@@ -330,7 +330,7 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		return ctrl.Result{}, err
 	}
 
-	// Required step: create the Snapshot once the source pod exists. The checkpoint cannot
+	// Required step: create the PodSnapshot once the source pod exists. The checkpoint cannot
 	// reach Ready without it, so creation failure fails or requeues the capture.
 	checkpointID, err := checkpoint.CheckpointID(ckpt)
 	if err != nil {
@@ -343,43 +343,43 @@ func (r *CheckpointReconciler) handleCreating(ctx context.Context, ckpt *nvidiac
 		}
 		return ctrl.Result{}, err
 	}
-	if err := r.ensureSnapshot(ctx, ckpt, checkpointID, pod.Name); err != nil {
+	if err := r.ensurePodSnapshot(ctx, ckpt, checkpointID, pod.Name); err != nil {
 		if commonController.IgnoreIntermediateError(err) != nil {
 			r.updateFailedStatus(ctx, ckpt, err)
 		}
 		return ctrl.Result{}, err
 	}
 
-	return r.observeSnapshot(ctx, ckpt, job, checkpointID)
+	return r.observePodSnapshot(ctx, ckpt, job, checkpointID)
 }
 
-// observeSnapshot maps the bound Snapshot's status (and the owned Job's failure / deadline
-// hang guards) onto the DynamoCheckpoint phase. Completion cascades up from SnapshotContent
-// → Snapshot → DynamoCheckpoint, so this never reads the Job's terminal annotation.
-func (r *CheckpointReconciler) observeSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, checkpointID string) (ctrl.Result, error) {
-	snap := &nvidiacomv1alpha1.Snapshot{}
-	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: snapshotName(checkpointID)}, snap); err != nil {
+// observePodSnapshot maps the bound PodSnapshot's status (and the owned Job's failure / deadline
+// hang guards) onto the DynamoCheckpoint phase. Completion cascades up from PodSnapshotContent
+// → PodSnapshot → DynamoCheckpoint, so this never reads the Job's terminal annotation.
+func (r *CheckpointReconciler) observePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, job *batchv1.Job, checkpointID string) (ctrl.Result, error) {
+	snap := &nvidiacomv1alpha1.PodSnapshot{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: podSnapshotName(checkpointID)}, snap); err != nil {
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{RequeueAfter: time.Second}, nil
 		}
 		return ctrl.Result{}, err
 	}
 
-	// A Snapshot can fail before it is bound (e.g. the SnapshotReconciler rejects the
+	// A PodSnapshot can fail before it is bound (e.g. the PodSnapshotReconciler rejects the
 	// source pod), so always observe Failed. Ready is only meaningful once bound.
-	if nvidiacomv1alpha1.IsSnapshotFailed(snap) {
-		return r.failCreating(ctx, ckpt, "SnapshotFailed", snapshotConditionMessage(snap, nvidiacomv1alpha1.SnapshotConditionFailed))
+	if nvidiacomv1alpha1.IsPodSnapshotFailed(snap) {
+		return r.failCreating(ctx, ckpt, "PodSnapshotFailed", podSnapshotConditionMessage(snap, nvidiacomv1alpha1.PodSnapshotConditionFailed))
 	}
-	if snap.Status.BoundSnapshotContentName != nil && nvidiacomv1alpha1.IsSnapshotSucceeded(snap) {
-		return r.markCheckpointReady(ctx, ckpt, checkpointID, snapshotConditionMessage(snap, nvidiacomv1alpha1.SnapshotConditionReady))
+	if snap.Status.BoundPodSnapshotContentName != nil && nvidiacomv1alpha1.IsPodSnapshotSucceeded(snap) {
+		return r.markCheckpointReady(ctx, ckpt, checkpointID, podSnapshotConditionMessage(snap, nvidiacomv1alpha1.PodSnapshotConditionReady))
 	}
 
-	// Hang guard 1: the owned Job failed while the Snapshot is still non-terminal.
+	// Hang guard 1: the owned Job failed while the PodSnapshot is still non-terminal.
 	if jobFailed, message := checkpointJobFailed(job); jobFailed {
 		return r.failCreating(ctx, ckpt, "JobFailed", message)
 	}
 
-	// Hang guard 2: the Job ran past its deadline without a terminal Snapshot.
+	// Hang guard 2: the Job ran past its deadline without a terminal PodSnapshot.
 	if job.Spec.ActiveDeadlineSeconds != nil {
 		deadline := job.CreationTimestamp.Add(time.Duration(*job.Spec.ActiveDeadlineSeconds) * time.Second)
 		if time.Now().After(deadline) {
@@ -406,7 +406,7 @@ func (r *CheckpointReconciler) failCreating(ctx context.Context, ckpt *nvidiacom
 	return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 }
 
-// markCheckpointReady marks the DynamoCheckpoint Ready after its bound Snapshot succeeded.
+// markCheckpointReady marks the DynamoCheckpoint Ready after its bound PodSnapshot succeeded.
 func (r *CheckpointReconciler) markCheckpointReady(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, message string) (ctrl.Result, error) {
 	log.FromContext(ctx).Info("Checkpoint ready", "checkpointID", checkpointID)
 	r.Recorder.Event(ckpt, corev1.EventTypeNormal, "CheckpointReady", message)
@@ -417,14 +417,14 @@ func (r *CheckpointReconciler) markCheckpointReady(ctx context.Context, ckpt *nv
 	meta.SetStatusCondition(&ckpt.Status.Conditions, metav1.Condition{
 		Type:    string(nvidiacomv1alpha1.DynamoCheckpointConditionJobCompleted),
 		Status:  metav1.ConditionTrue,
-		Reason:  "SnapshotReady",
+		Reason:  "PodSnapshotReady",
 		Message: message,
 	})
 	return ctrl.Result{}, r.Status().Update(ctx, ckpt)
 }
 
-// snapshotConditionMessage returns the message of the named Snapshot condition, or "".
-func snapshotConditionMessage(snap *nvidiacomv1alpha1.Snapshot, condType string) string {
+// podSnapshotConditionMessage returns the message of the named PodSnapshot condition, or "".
+func podSnapshotConditionMessage(snap *nvidiacomv1alpha1.PodSnapshot, condType string) string {
 	if cond := meta.FindStatusCondition(snap.Status.Conditions, condType); cond != nil {
 		return cond.Message
 	}
@@ -528,10 +528,10 @@ func (r *CheckpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		Owns(&nvidiacomv1alpha1.Snapshot{}, builder.WithPredicates(predicate.Funcs{
+		Owns(&nvidiacomv1alpha1.PodSnapshot{}, builder.WithPredicates(predicate.Funcs{
 			// Ignore create (we just created it). Watch update (status mirror) and
 			// delete (re-enqueue to recreate / unblock). Delete is safe: reconcile
-			// exits at the deletion-timestamp guard before reaching observeSnapshot.
+			// exits at the deletion-timestamp guard before reaching observePodSnapshot.
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
 			UpdateFunc:  func(ue event.UpdateEvent) bool { return true },

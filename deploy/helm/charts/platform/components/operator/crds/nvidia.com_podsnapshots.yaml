@@ -8,20 +8,20 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.16.4
     helm.sh/resource-policy: keep
-  name: snapshots.nvidia.com
+  name: podsnapshots.nvidia.com
 spec:
   group: nvidia.com
   names:
-    kind: Snapshot
-    listKind: SnapshotList
-    plural: snapshots
+    kind: PodSnapshot
+    listKind: PodSnapshotList
+    plural: podsnapshots
     shortNames:
-      - snap
-    singular: snapshot
+      - podsnap
+    singular: podsnapshot
   scope: Namespaced
   versions:
     - additionalPrinterColumns:
-        - description: Bound SnapshotContent
+        - description: Bound PodSnapshotContent
           jsonPath: .status.boundSnapshotContentName
           name: Content
           type: string
@@ -36,7 +36,7 @@ spec:
       schema:
         openAPIV3Schema:
           description: |-
-            Snapshot is the Schema for the snapshots API. It is the namespaced binding
+            PodSnapshot is the Schema for the snapshots API. It is the namespaced binding
             for a captured container checkpoint and is consumed by restore paths.
           properties:
             apiVersion:
@@ -57,14 +57,7 @@ spec:
             metadata:
               type: object
             spec:
-              description: |-
-                SnapshotSpec defines the desired state of Snapshot.
-
-                Minimal "trigger" shape: it names what to capture (an existing pod). All
-                capture parameters the node agent needs at dump time (checkpoint ID, target
-                container, storage base path) are read from the referenced pod's existing
-                labels/annotations and mounts, not duplicated here. The spec is immutable
-                after creation.
+              description: PodSnapshotSpec defines the desired state of PodSnapshot.
               properties:
                 source:
                   description: |-
@@ -73,9 +66,9 @@ spec:
                   properties:
                     podRef:
                       description: |-
-                        PodRef references the pod, in the Snapshot's namespace, that is captured.
+                        PodRef references the pod, in the PodSnapshot's namespace, that is captured.
                         The operator prepares the pod (control volume, target-container annotation,
-                        checkpoint storage mount) before creating the Snapshot.
+                        checkpoint storage mount) before creating the PodSnapshot.
                       properties:
                         name:
                           description: Name of the source pod.
@@ -96,17 +89,17 @@ spec:
                 - source
               type: object
             status:
-              description: SnapshotStatus defines the observed state of Snapshot.
+              description: PodSnapshotStatus defines the observed state of PodSnapshot.
               properties:
                 boundSnapshotContentName:
                   description: |-
-                    BoundSnapshotContentName is the name of the cluster-scoped SnapshotContent
-                    this Snapshot is bound to. It is nil until the agent has created the
+                    BoundPodSnapshotContentName is the name of the cluster-scoped PodSnapshotContent
+                    this PodSnapshot is bound to. It is nil until the agent has created the
                     content and recorded the binding.
                   type: string
                 conditions:
                   description: |-
-                    Conditions reflect the latest observations of the Snapshot's state.
+                    Conditions reflect the latest observations of the PodSnapshot's state.
                     Standard types are Ready and Failed.
                   items:
                     description: Condition contains details for one aspect of the current state of this API Resource.

@@ -36,21 +36,21 @@ rules:
 
 {{- if .Values.rbac.create }}
 ---
-# SnapshotContent is cluster-scoped, so the agent always needs a ClusterRole for it.
+# PodSnapshotContent is cluster-scoped, so the agent always needs a ClusterRole for it.
 # The agent reads work orders and writes only their status; it never creates, deletes,
 # or touches Snapshots (the work order is self-contained).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
-  name: {{ include "snapshot.fullname" . }}-agent-snapshotcontents
+  name: {{ include "snapshot.fullname" . }}-agent-podsnapshotcontents
   labels:
     {{- include "snapshot.labels" . | nindent 4 }}
 rules:
   - apiGroups: ["nvidia.com"]
-    resources: ["snapshotcontents"]
+    resources: ["podsnapshotcontents"]
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["nvidia.com"]
-    resources: ["snapshotcontents/status"]
+    resources: ["podsnapshotcontents/status"]
     verbs: ["update", "patch"]
 {{- end }}
 

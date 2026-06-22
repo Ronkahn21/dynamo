@@ -42,7 +42,7 @@ import (
 // NodeController watches local-node pods with checkpoint metadata and reconciles
 // snapshot execution for checkpoint and restore requests. The restore path is
 // driven by a client-go pod informer; the capture path is driven by a dynamic
-// informer over SnapshotContent work orders filtered to this node, with typed
+// informer over PodSnapshotContent work orders filtered to this node, with typed
 // reads/writes via an uncached controller-runtime client.
 type NodeController struct {
 	config       *types.AgentConfig
@@ -57,7 +57,7 @@ type NodeController struct {
 	inFlight   map[string]struct{}
 	inFlightMu sync.Mutex
 
-	// contentIndexer is the SnapshotContent informer's indexer, indexed by source pod
+	// contentIndexer is the PodSnapshotContent informer's indexer, indexed by source pod
 	// (podRefIndex). The source-pod informer uses it to map a pod event back to its work order.
 	contentIndexer cache.Indexer
 
@@ -74,13 +74,13 @@ const (
 	restoreContainerResolveInterval = 50 * time.Millisecond
 	restoreContainerResolveTimeout  = 30 * time.Second
 
-	// snapshotContentResyncInterval re-drives every SnapshotContent work order so a
+	// snapshotContentResyncInterval re-drives every PodSnapshotContent work order so a
 	// not-yet-Ready source pod is re-checked for quiesce without a busy loop.
 	snapshotContentResyncInterval = 10 * time.Second
 )
 
-// snapshotContentGVR is the cluster-scoped resource the capture informer watches.
-var snapshotContentGVR = nvidiacomv1alpha1.GroupVersion.WithResource("snapshotcontents")
+// podSnapshotContentGVR is the cluster-scoped resource the capture informer watches.
+var podSnapshotContentGVR = nvidiacomv1alpha1.GroupVersion.WithResource("podsnapshotcontents")
 
 // NewNodeController creates the node-local controller that runs inside snapshot-agent.
 func NewNodeController(
@@ -184,9 +184,9 @@ func (w *NodeController) Run(ctx context.Context) error {
 	go restoreFactory.Start(w.stopCh)
 	syncFuncs = append(syncFuncs, restoreInformer.HasSynced)
 
-	// Capture path: a dynamic informer over SnapshotContent work orders, filtered at
+	// Capture path: a dynamic informer over PodSnapshotContent work orders, filtered at
 	// the list/watch level to this node's mirror label. The node-label filter is the
-	// node scoping; reconcileSnapshotContent keeps a defensive nodeName check.
+	// node scoping; reconcilePodSnapshotContent keeps a defensive nodeName check.
 	nodeContentSelector := labels.SelectorFromSet(labels.Set{snapshotprotocol.SnapshotNodeLabel: w.config.NodeName}).String()
 	dynFactory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(
 		w.dynClient, snapshotContentResyncInterval, metav1.NamespaceAll,
@@ -194,9 +194,9 @@ func (w *NodeController) Run(ctx context.Context) error {
 			opts.LabelSelector = nodeContentSelector
 		},
 	)
-	contentInformer := dynFactory.ForResource(snapshotContentGVR).Informer()
+	contentInformer := dynFactory.ForResource(podSnapshotContentGVR).Informer()
 	// Index work orders by their source pod so a source-pod event maps back to its
-	// SnapshotContent in O(1). Must be registered before the informer starts.
+	// PodSnapshotContent in O(1). Must be registered before the informer starts.
 	if err := contentInformer.AddIndexers(cache.Indexers{podRefIndex: podRefIndexFunc}); err != nil {
 		return fmt.Errorf("failed to add snapshot-content podRef indexer: %w", err)
 	}
@@ -204,12 +204,12 @@ func (w *NodeController) Run(ctx context.Context) error {
 	if _, err := contentInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if name, ok := contentNameFromInformerObj(obj); ok {
-				w.reconcileSnapshotContent(ctx, name)
+				w.reconcilePodSnapshotContent(ctx, name)
 			}
 		},
 		UpdateFunc: func(_, newObj interface{}) {
 			if name, ok := contentNameFromInformerObj(newObj); ok {
-				w.reconcileSnapshotContent(ctx, name)
+				w.reconcilePodSnapshotContent(ctx, name)
 			}
 		},
 	}); err != nil {
@@ -220,7 +220,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 
 	// Source-pod informer: capture-source pods carry CheckpointSourceLabel=true. A pod status
 	// change (a checkpoint container crashing, or the target becoming ready) does not touch the
-	// SnapshotContent, so without this trigger it would only be acted on at the content informer's
+	// PodSnapshotContent, so without this trigger it would only be acted on at the content informer's
 	// resync. It needs its own factory: its selector is disjoint from the restore informer's.
 	sourceSelector := labels.SelectorFromSet(labels.Set{snapshotprotocol.CheckpointSourceLabel: "true"}).String()
 	sourceFactoryOpts := append([]informers.SharedInformerOption{
@@ -253,7 +253,7 @@ func (w *NodeController) Run(ctx context.Context) error {
 		return fmt.Errorf("failed to sync informer caches")
 	}
 
-	w.log.Info("Snapshot node controller started and caches synced")
+	w.log.Info("PodSnapshot node controller started and caches synced")
 	<-ctx.Done()
 	close(w.stopCh)
 	return nil
@@ -613,10 +613,10 @@ func (w *NodeController) release(podKey string) {
 	delete(w.inFlight, podKey)
 }
 
-// podRefIndex is the SnapshotContent informer index keyed by source pod ("<namespace>/<name>").
+// podRefIndex is the PodSnapshotContent informer index keyed by source pod ("<namespace>/<name>").
 const podRefIndex = "byPodRef"
 
-// podRefIndexFunc indexes a SnapshotContent by its source pod ("<snapshotRef.namespace>/<source.podRef.name>").
+// podRefIndexFunc indexes a PodSnapshotContent by its source pod ("<snapshotRef.namespace>/<source.podRef.name>").
 // It runs against the dynamic informer's *unstructured.Unstructured objects; an unexpected type or a
 // missing field yields no index entry (nil) rather than an error, so it never poisons the index.
 func podRefIndexFunc(obj interface{}) ([]string, error) {
@@ -633,8 +633,8 @@ func podRefIndexFunc(obj interface{}) ([]string, error) {
 }
 
 // contentFromInformerObj converts a dynamic informer object (or its DeletedFinalStateUnknown
-// tombstone) to a typed SnapshotContent. It returns false on an unexpected type.
-func contentFromInformerObj(obj interface{}) (*nvidiacomv1alpha1.SnapshotContent, bool) {
+// tombstone) to a typed PodSnapshotContent. It returns false on an unexpected type.
+func contentFromInformerObj(obj interface{}) (*nvidiacomv1alpha1.PodSnapshotContent, bool) {
 	if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
 		obj = tombstone.Obj
 	}
@@ -642,18 +642,18 @@ func contentFromInformerObj(obj interface{}) (*nvidiacomv1alpha1.SnapshotContent
 	if !ok {
 		return nil, false
 	}
-	content := &nvidiacomv1alpha1.SnapshotContent{}
+	content := &nvidiacomv1alpha1.PodSnapshotContent{}
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, content); err != nil {
 		return nil, false
 	}
 	return content, true
 }
 
-// chooseActiveContent returns the name of the oldest non-terminal SnapshotContent among the indexed
+// chooseActiveContent returns the name of the oldest non-terminal PodSnapshotContent among the indexed
 // objects (oldest first by CreationTimestamp, ties broken by Name), or "" when none are active.
 // Driving the oldest until it finishes gives deterministic, stable selection across pod events.
 func chooseActiveContent(objs []interface{}) string {
-	var chosen *nvidiacomv1alpha1.SnapshotContent
+	var chosen *nvidiacomv1alpha1.PodSnapshotContent
 	for _, obj := range objs {
 		content, ok := contentFromInformerObj(obj)
 		if !ok || isContentTerminal(content) {

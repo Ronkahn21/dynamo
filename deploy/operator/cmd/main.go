@@ -264,10 +264,10 @@ func main() {
 		mgrOpts.Cache.DefaultNamespaces = map[string]cache.Config{
 			restrictedNamespace: {},
 		}
-            // SnapshotContent is cluster-scoped, so DefaultNamespaces does not cover it.
-            // Register it cluster-wide explicitly so the SnapshotReconciler can watch it.
+            // PodSnapshotContent is cluster-scoped, so DefaultNamespaces does not cover it.
+            // Register it cluster-wide explicitly so the PodSnapshotReconciler can watch it.
             mgrOpts.Cache.ByObject = map[client.Object]cache.ByObject{
-			&nvidiacomv1alpha1.SnapshotContent{}: {},
+			&nvidiacomv1alpha1.PodSnapshotContent{}: {},
 		}
 		setupLog.Info("Restricted namespace configured, launching in restricted mode", "namespace", restrictedNamespace)
 
@@ -715,11 +715,11 @@ func registerControllers(
 		return fmt.Errorf("unable to create DynamoCheckpoint controller: %w", err)
 	}
 
-	if err = (&controller.SnapshotReconciler{
+	if err = (&controller.PodSnapshotReconciler{
 		Client:   mgr.GetClient(),
 		Recorder: mgr.GetEventRecorderFor("snapshot"),
 	}).SetupWithManager(mgr); err != nil {
-		return fmt.Errorf("unable to create Snapshot controller: %w", err)
+		return fmt.Errorf("unable to create PodSnapshot controller: %w", err)
 	}
 
 	if runtimeConfig.GroveEnabled {
@@ -769,10 +769,10 @@ func registerWebhooks(
 		setupLog.Info("POD_SERVICE_ACCOUNT/POD_NAMESPACE not set; operator SA self-identification disabled")
 	}
 
-	// Temporary internal gate for GMS + Snapshot.
+	// Temporary internal gate for GMS + PodSnapshot.
 	if os.Getenv(consts.DynamoOperatorAllowGMSSnapshotEnvVar) == "1" {
 		setupLog.Info(
-			"INTERNAL OVERRIDE: GMS + Snapshot admission rule disabled via env var; do NOT enable in production",
+			"INTERNAL OVERRIDE: GMS + PodSnapshot admission rule disabled via env var; do NOT enable in production",
 			"envVar", consts.DynamoOperatorAllowGMSSnapshotEnvVar,
 		)
 	}

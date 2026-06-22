@@ -103,11 +103,11 @@ func TestEnsureSnapshot_CreatesWhenAbsent(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
 	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt)
 
-	require.NoError(t, r.ensureSnapshot(context.Background(), ckpt, testHash, "worker-xyz"))
+	require.NoError(t, r.ensurePodSnapshot(context.Background(), ckpt, testHash, "worker-xyz"))
 
-	snap := &nvidiacomv1alpha1.Snapshot{}
+	snap := &nvidiacomv1alpha1.PodSnapshot{}
 	require.NoError(t, r.Get(context.Background(),
-		client.ObjectKey{Namespace: testNamespace, Name: snapshotName(testHash)}, snap))
+		client.ObjectKey{Namespace: testNamespace, Name: podSnapshotName(testHash)}, snap))
 	assert.Equal(t, testHash, snap.Labels[snapshotprotocol.CheckpointIDLabel])
 	assert.Equal(t, "worker-xyz", snap.Spec.Source.PodRef.Name)
 	assert.True(t, metav1.IsControlledBy(snap, ckpt), "snapshot must be controlled by the checkpoint")
@@ -116,27 +116,27 @@ func TestEnsureSnapshot_CreatesWhenAbsent(t *testing.T) {
 func TestEnsureSnapshot_NoopWhenAlreadyOwned(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
 	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt)
-	require.NoError(t, r.ensureSnapshot(context.Background(), ckpt, testHash, "worker-xyz"))
+	require.NoError(t, r.ensurePodSnapshot(context.Background(), ckpt, testHash, "worker-xyz"))
 
 	// Second call is a no-op (already owned by us).
-	require.NoError(t, r.ensureSnapshot(context.Background(), ckpt, testHash, "worker-xyz"))
+	require.NoError(t, r.ensurePodSnapshot(context.Background(), ckpt, testHash, "worker-xyz"))
 
-	var snaps nvidiacomv1alpha1.SnapshotList
+	var snaps nvidiacomv1alpha1.PodSnapshotList
 	require.NoError(t, r.List(context.Background(), &snaps, client.InNamespace(testNamespace)))
 	assert.Len(t, snaps.Items, 1)
 }
 
 func TestEnsureSnapshot_ErrorsWhenNotOwned(t *testing.T) {
 	ckpt := newOwnedCheckpoint()
-	foreign := &nvidiacomv1alpha1.Snapshot{
-		ObjectMeta: metav1.ObjectMeta{Name: snapshotName(testHash), Namespace: testNamespace},
-		Spec: nvidiacomv1alpha1.SnapshotSpec{
-			Source: nvidiacomv1alpha1.SnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "someone-else"}},
+	foreign := &nvidiacomv1alpha1.PodSnapshot{
+		ObjectMeta: metav1.ObjectMeta{Name: podSnapshotName(testHash), Namespace: testNamespace},
+		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
+			Source: nvidiacomv1alpha1.PodSnapshotSource{PodRef: nvidiacomv1alpha1.PodReference{Name: "someone-else"}},
 		},
 	}
 	r := makeCheckpointReconciler(checkpointTestScheme(), ckpt, foreign)
 
-	err := r.ensureSnapshot(context.Background(), ckpt, testHash, "worker-xyz")
+	err := r.ensurePodSnapshot(context.Background(), ckpt, testHash, "worker-xyz")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not owned by checkpoint")
 	// Must be terminal (Forbidden) so the capture fails instead of requeuing forever.

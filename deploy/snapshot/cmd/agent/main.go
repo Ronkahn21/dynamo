@@ -48,7 +48,7 @@ func main() {
 	}()
 
 	// rootCtx is cancelled on signal. The single node controller drives both the
-	// restore (pod informer) and capture (SnapshotContent informer) paths and shuts
+	// restore (pod informer) and capture (PodSnapshotContent informer) paths and shuts
 	// down when rootCtx is cancelled.
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()

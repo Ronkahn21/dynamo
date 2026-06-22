@@ -47,20 +47,20 @@ type CheckpointParams struct {
 	StartedAt time.Time
 }
 
-// reconcileSnapshotContent is the pre-bind gate for a SnapshotContent work order. It validates the
+// reconcilePodSnapshotContent is the pre-bind gate for a PodSnapshotContent work order. It validates the
 // source pod (existence and provenance) and, when the pod is valid, hands off to reconcileSourcePod
 // — the single capture path. It never runs the capture flow itself. Driven by the content informer
 // (Add/Update) and its 10s resync; the resync is the backstop that eventually writes a terminal
 // failure for a work order whose source pod is gone.
-func (w *NodeController) reconcileSnapshotContent(ctx context.Context, name string) {
+func (w *NodeController) reconcilePodSnapshotContent(ctx context.Context, name string) {
 	logger := w.log.WithValues("content", name)
 
-	content := &nvidiacomv1alpha1.SnapshotContent{}
+	content := &nvidiacomv1alpha1.PodSnapshotContent{}
 	if err := w.client.Get(ctx, client.ObjectKey{Name: name}, content); err != nil {
 		if apierrors.IsNotFound(err) {
 			return
 		}
-		logger.Error(err, "Failed to get SnapshotContent")
+		logger.Error(err, "Failed to get PodSnapshotContent")
 		return
 	}
 
@@ -74,10 +74,10 @@ func (w *NodeController) reconcileSnapshotContent(ctx context.Context, name stri
 	}
 
 	pod := &corev1.Pod{}
-	key := client.ObjectKey{Namespace: content.Spec.SnapshotRef.Namespace, Name: content.Spec.Source.PodRef.Name}
+	key := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: content.Spec.Source.PodRef.Name}
 	if err := w.client.Get(ctx, key, pod); err != nil {
 		if apierrors.IsNotFound(err) {
-			// The operator creates the SnapshotContent only after the source pod exists, and this
+			// The operator creates the PodSnapshotContent only after the source pod exists, and this
 			// is a linearizable (quorum) Get, so NotFound means the pod was deleted, not a
 			// creation race: fail the work order terminally.
 			w.writeFailed(ctx, content, "SourcePodNotFound", fmt.Errorf("source pod %q not found", key.String()))
@@ -96,11 +96,11 @@ func (w *NodeController) reconcileSnapshotContent(ctx context.Context, name stri
 }
 
 // reconcileSourcePod is the single capture path. It is driven by source-pod events and by
-// reconcileSnapshotContent once the pod is validated. It selects the oldest active work order for
+// reconcilePodSnapshotContent once the pod is validated. It selects the oldest active work order for
 // the pod and drives the unstick + dump. Capture parameters come from the source pod, which is the
 // single source of truth; it never mutates spec and writes status via Status().Patch only. The
 // triggering content event (if any) may name a different work order than the one chosen here — the
-// event is only a trigger; chooseActiveContent picks the oldest active SnapshotContent for the pod.
+// event is only a trigger; chooseActiveContent picks the oldest active PodSnapshotContent for the pod.
 func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod) {
 	if pod.Spec.NodeName != w.config.NodeName {
 		return
@@ -110,7 +110,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	}
 	objs, err := w.contentIndexer.ByIndex(podRefIndex, pod.Namespace+"/"+pod.Name)
 	if err != nil {
-		w.log.Error(err, "Failed to look up SnapshotContent by source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
+		w.log.Error(err, "Failed to look up PodSnapshotContent by source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
 		return
 	}
 	name := chooseActiveContent(objs)
@@ -119,10 +119,10 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 	}
 	logger := w.log.WithValues("content", name)
 
-	content := &nvidiacomv1alpha1.SnapshotContent{}
+	content := &nvidiacomv1alpha1.PodSnapshotContent{}
 	if err := w.client.Get(ctx, client.ObjectKey{Name: name}, content); err != nil {
 		if !apierrors.IsNotFound(err) {
-			logger.Error(err, "Failed to get SnapshotContent")
+			logger.Error(err, "Failed to get PodSnapshotContent")
 		}
 		return
 	}
@@ -149,7 +149,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return
 	}
 	// Provenance/liveness guard. The terminal writeFailed for these is owned by
-	// reconcileSnapshotContent (pre-bind); here we only skip capture and let the content resync
+	// reconcilePodSnapshotContent (pre-bind); here we only skip capture and let the content resync
 	// write the failure.
 	if reason, _ := classifySourcePod(content, pod); reason != "" {
 		logger.V(1).Info("Skipping capture; source pod not usable", "reason", reason, "pod", pod.Name)
@@ -206,7 +206,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 		return
 	}
 
-	leaseKey := client.ObjectKey{Namespace: content.Spec.SnapshotRef.Namespace, Name: content.Name}
+	leaseKey := client.ObjectKey{Namespace: content.Spec.PodSnapshotRef.Namespace, Name: content.Name}
 	acquired, err := w.acquireLease(ctx, leaseKey)
 	if err != nil {
 		logger.Error(err, "Failed to acquire checkpoint lease", "lease", leaseKey.String())
@@ -225,7 +225,7 @@ func (w *NodeController) reconcileSourcePod(ctx context.Context, pod *corev1.Pod
 // the dump does not re-resolve them.
 func (w *NodeController) runCheckpoint(
 	ctx context.Context,
-	content *nvidiacomv1alpha1.SnapshotContent,
+	content *nvidiacomv1alpha1.PodSnapshotContent,
 	pod *corev1.Pod,
 	containerName, containerID string,
 	containerPID int,
@@ -269,9 +269,9 @@ func (w *NodeController) runCheckpoint(
 
 // classifySourcePod reports whether the source pod is unusable for capture, returning a terminal
 // failure reason and message ("" reason means the pod is valid). It is pure: callers decide whether
-// to writeFailed (reconcileSnapshotContent, pre-bind) or merely skip capture (reconcileSourcePod
+// to writeFailed (reconcilePodSnapshotContent, pre-bind) or merely skip capture (reconcileSourcePod
 // guard). Pod existence (NotFound) is handled by the caller, which holds the Get error.
-func classifySourcePod(content *nvidiacomv1alpha1.SnapshotContent, pod *corev1.Pod) (string, string) {
+func classifySourcePod(content *nvidiacomv1alpha1.PodSnapshotContent, pod *corev1.Pod) (string, string) {
 	if content.Spec.Source.PodRef.UID != "" && pod.UID != content.Spec.Source.PodRef.UID {
 		return "StalePodReference",
 			fmt.Sprintf("source pod %q UID %q does not match work order UID %q", pod.Name, pod.UID, content.Spec.Source.PodRef.UID)
@@ -287,7 +287,7 @@ func classifySourcePod(content *nvidiacomv1alpha1.SnapshotContent, pod *corev1.P
 // still-running containers when any checkpoint container has terminated non-zero. It returns
 // true when a failure was handled and the caller must stop. Init containers
 // (pod.Status.InitContainerStatuses) are intentionally out of scope.
-func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *nvidiacomv1alpha1.SnapshotContent, pod *corev1.Pod) bool {
+func (w *NodeController) failCheckpointOnContainerExit(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent, pod *corev1.Pod) bool {
 	var failed *corev1.ContainerStatus
 	for i := range pod.Status.ContainerStatuses {
 		cs := &pod.Status.ContainerStatuses[i]
@@ -336,30 +336,30 @@ func (w *NodeController) killRunningContainers(ctx context.Context, logger logr.
 }
 
 // writeReady patches status with the Ready condition.
-func (w *NodeController) writeReady(ctx context.Context, content *nvidiacomv1alpha1.SnapshotContent) {
+func (w *NodeController) writeReady(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent) {
 	patch := client.MergeFrom(content.DeepCopy())
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
-		Type:    nvidiacomv1alpha1.SnapshotConditionReady,
+		Type:    nvidiacomv1alpha1.PodSnapshotConditionReady,
 		Status:  metav1.ConditionTrue,
 		Reason:  "Captured",
 		Message: "Checkpoint captured and verified",
 	})
 	if err := w.client.Status().Patch(ctx, content, patch); err != nil {
-		w.log.Error(err, "Failed to write SnapshotContent ready status", "content", content.Name)
+		w.log.Error(err, "Failed to write PodSnapshotContent ready status", "content", content.Name)
 	}
 }
 
 // writeFailed patches status with the Failed condition.
-func (w *NodeController) writeFailed(ctx context.Context, content *nvidiacomv1alpha1.SnapshotContent, reason string, cause error) {
+func (w *NodeController) writeFailed(ctx context.Context, content *nvidiacomv1alpha1.PodSnapshotContent, reason string, cause error) {
 	patch := client.MergeFrom(content.DeepCopy())
 	meta.SetStatusCondition(&content.Status.Conditions, metav1.Condition{
-		Type:    nvidiacomv1alpha1.SnapshotConditionFailed,
+		Type:    nvidiacomv1alpha1.PodSnapshotConditionFailed,
 		Status:  metav1.ConditionTrue,
 		Reason:  reason,
 		Message: cause.Error(),
 	})
 	if err := w.client.Status().Patch(ctx, content, patch); err != nil {
-		w.log.Error(err, "Failed to write SnapshotContent failed status", "content", content.Name, "reason", reason)
+		w.log.Error(err, "Failed to write PodSnapshotContent failed status", "content", content.Name, "reason", reason)
 	}
 }
 
@@ -420,8 +420,8 @@ func containerIDForName(pod *corev1.Pod, containerName string) string {
 }
 
 // isContentTerminal reports whether the work order already has a terminal condition.
-func isContentTerminal(content *nvidiacomv1alpha1.SnapshotContent) bool {
-	for _, t := range []string{nvidiacomv1alpha1.SnapshotConditionReady, nvidiacomv1alpha1.SnapshotConditionFailed} {
+func isContentTerminal(content *nvidiacomv1alpha1.PodSnapshotContent) bool {
+	for _, t := range []string{nvidiacomv1alpha1.PodSnapshotConditionReady, nvidiacomv1alpha1.PodSnapshotConditionFailed} {
 		if cond := meta.FindStatusCondition(content.Status.Conditions, t); cond != nil && cond.Status == metav1.ConditionTrue {
 			return true
 		}

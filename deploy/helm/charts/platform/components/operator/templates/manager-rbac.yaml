@@ -330,8 +330,8 @@ rules:
   - dynamographdeploymentscalingadapters
   - dynamomodels
   - dynamoworkermetadatas
-  - snapshotcontents
-  - snapshots
+  - podsnapshotcontents
+  - podsnapshots
   verbs:
   - create
   - delete
@@ -348,7 +348,7 @@ rules:
   - dynamographdeploymentrequests/finalizers
   - dynamographdeployments/finalizers
   - dynamomodels/finalizers
-  - snapshots/finalizers
+  - podsnapshots/finalizers
   verbs:
   - update
 - apiGroups:
@@ -360,8 +360,8 @@ rules:
   - dynamographdeployments/status
   - dynamographdeploymentscalingadapters/status
   - dynamomodels/status
-  - snapshotcontents/status
-  - snapshots/status
+  - podsnapshotcontents/status
+  - podsnapshots/status
   verbs:
   - get
   - patch

@@ -21,9 +21,9 @@ import (
 // checkpointSnapshotFieldManager is the Server-Side Apply field owner for Snapshots.
 const checkpointSnapshotFieldManager = "dynamo-checkpoint-controller"
 
-// snapshotName returns the deterministic Snapshot name for a checkpoint ID.
-func snapshotName(checkpointID string) string {
-	return "snapshot-" + checkpointID
+// podSnapshotName returns the deterministic PodSnapshot name for a checkpoint ID.
+func podSnapshotName(checkpointID string) string {
+	return "podsnapshot-" + checkpointID
 }
 
 // findSourcePod returns the checkpoint Job's pod, or a NotFound error if the Job has not
@@ -44,24 +44,24 @@ func (r *CheckpointReconciler) findSourcePod(ctx context.Context, job *batchv1.J
 	return nil, apierrors.NewNotFound(corev1.Resource("pods"), job.Name)
 }
 
-// ensureSnapshot creates this checkpoint's Snapshot (owned by ckpt) via Server-Side Apply when
+// ensurePodSnapshot creates this checkpoint's PodSnapshot (owned by ckpt) via Server-Side Apply when
 // absent, and is a no-op when it already exists and is ours.
-func (r *CheckpointReconciler) ensureSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, sourcePodName string) error {
-	owned, err := r.findOwnedSnapshot(ctx, ckpt, snapshotName(checkpointID))
+func (r *CheckpointReconciler) ensurePodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, sourcePodName string) error {
+	owned, err := r.findOwnedPodSnapshot(ctx, ckpt, podSnapshotName(checkpointID))
 	if err != nil {
 		return err
 	}
 	if owned {
 		return nil
 	}
-	return r.applySnapshot(ctx, ckpt, buildSnapshot(ckpt, checkpointID, sourcePodName))
+	return r.applyPodSnapshot(ctx, ckpt, buildPodSnapshot(ckpt, checkpointID, sourcePodName))
 }
 
-// findOwnedSnapshot reports whether this checkpoint's Snapshot already exists and is owned by
-// ckpt. It returns a terminal Forbidden error (and emits an event) when a Snapshot with the same
+// findOwnedPodSnapshot reports whether this checkpoint's PodSnapshot already exists and is owned by
+// ckpt. It returns a terminal Forbidden error (and emits an event) when a PodSnapshot with the same
 // name exists but is owned by another controller; (false, nil) means none exists yet.
-func (r *CheckpointReconciler) findOwnedSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, name string) (bool, error) {
-	existing := &nvidiacomv1alpha1.Snapshot{}
+func (r *CheckpointReconciler) findOwnedPodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, name string) (bool, error) {
+	existing := &nvidiacomv1alpha1.PodSnapshot{}
 	if err := r.Get(ctx, client.ObjectKey{Namespace: ckpt.Namespace, Name: name}, existing); err != nil {
 		return false, client.IgnoreNotFound(err)
 	}
@@ -71,52 +71,52 @@ func (r *CheckpointReconciler) findOwnedSnapshot(ctx context.Context, ckpt *nvid
 	// Forbidden is terminal (see controller_common.IgnoreIntermediateError): a foreign-owned
 	// name collision will not resolve on retry.
 	conflict := apierrors.NewForbidden(
-		nvidiacomv1alpha1.GroupVersion.WithResource("snapshots").GroupResource(),
+		nvidiacomv1alpha1.GroupVersion.WithResource("podsnapshots").GroupResource(),
 		name,
 		fmt.Errorf("exists but is not owned by checkpoint %q", ckpt.Name),
 	)
-	r.Recorder.Event(ckpt, corev1.EventTypeWarning, "SnapshotCreateFailed", conflict.Error())
+	r.Recorder.Event(ckpt, corev1.EventTypeWarning, "PodSnapshotCreateFailed", conflict.Error())
 	return false, conflict
 }
 
-// buildSnapshot constructs the desired Snapshot for a checkpoint.
-func buildSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, sourcePodName string) *nvidiacomv1alpha1.Snapshot {
-	return &nvidiacomv1alpha1.Snapshot{
+// buildPodSnapshot constructs the desired PodSnapshot for a checkpoint.
+func buildPodSnapshot(ckpt *nvidiacomv1alpha1.DynamoCheckpoint, checkpointID, sourcePodName string) *nvidiacomv1alpha1.PodSnapshot {
+	return &nvidiacomv1alpha1.PodSnapshot{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: nvidiacomv1alpha1.GroupVersion.String(),
-			Kind:       "Snapshot",
+			Kind:       "PodSnapshot",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      snapshotName(checkpointID),
+			Name:      podSnapshotName(checkpointID),
 			Namespace: ckpt.Namespace,
 			Labels:    map[string]string{snapshotprotocol.CheckpointIDLabel: checkpointID},
 		},
-		Spec: nvidiacomv1alpha1.SnapshotSpec{
-			Source: nvidiacomv1alpha1.SnapshotSource{
+		Spec: nvidiacomv1alpha1.PodSnapshotSpec{
+			Source: nvidiacomv1alpha1.PodSnapshotSource{
 				PodRef: nvidiacomv1alpha1.PodReference{Name: sourcePodName},
 			},
 		},
 	}
 }
 
-// applySnapshot sets ckpt as controller owner and applies the Snapshot via Server-Side Apply,
+// applyPodSnapshot sets ckpt as controller owner and applies the PodSnapshot via Server-Side Apply,
 // emitting an event on success or failure.
-func (r *CheckpointReconciler) applySnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, snap *nvidiacomv1alpha1.Snapshot) error {
+func (r *CheckpointReconciler) applyPodSnapshot(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, snap *nvidiacomv1alpha1.PodSnapshot) error {
 	if err := ctrl.SetControllerReference(ckpt, snap, r.Scheme()); err != nil {
 		return err
 	}
 	if err := r.Patch(ctx, snap, client.Apply,
 		client.FieldOwner(checkpointSnapshotFieldManager), client.ForceOwnership); err != nil {
-		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "SnapshotCreateFailed", err.Error())
+		r.Recorder.Event(ckpt, corev1.EventTypeWarning, "PodSnapshotCreateFailed", err.Error())
 		return err
 	}
-	r.Recorder.Eventf(ckpt, corev1.EventTypeNormal, "SnapshotCreated", "Created Snapshot %s", snap.Name)
+	r.Recorder.Eventf(ckpt, corev1.EventTypeNormal, "PodSnapshotCreated", "Created PodSnapshot %s", snap.Name)
 	return nil
 }
 
-// updateFailedStatus marks the checkpoint Failed after a terminal Snapshot error. The failure
-// event is emitted at the point of failure in ensureSnapshot; this records status only and does
-// not stomp the JobCreated condition (the Job was created; only the Snapshot failed).
+// updateFailedStatus marks the checkpoint Failed after a terminal PodSnapshot error. The failure
+// event is emitted at the point of failure in ensurePodSnapshot; this records status only and does
+// not stomp the JobCreated condition (the Job was created; only the PodSnapshot failed).
 func (r *CheckpointReconciler) updateFailedStatus(ctx context.Context, ckpt *nvidiacomv1alpha1.DynamoCheckpoint, err error) {
 	ckpt.Status.Phase = nvidiacomv1alpha1.DynamoCheckpointPhaseFailed
 	ckpt.Status.Message = fmt.Sprintf("snapshot creation failed: %v", err)

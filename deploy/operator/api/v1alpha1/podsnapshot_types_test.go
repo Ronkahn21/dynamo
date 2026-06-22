@@ -33,7 +33,7 @@ func TestSchemeRegistersSnapshotKinds(t *testing.T) {
 	if err := AddToScheme(scheme); err != nil {
 		t.Fatalf("AddToScheme failed: %v", err)
 	}
-	for _, kind := range []string{"Snapshot", "SnapshotList", "SnapshotContent", "SnapshotContentList"} {
+	for _, kind := range []string{"PodSnapshot", "PodSnapshotList", "PodSnapshotContent", "PodSnapshotContentList"} {
 		if !scheme.Recognizes(GroupVersion.WithKind(kind)) {
 			t.Errorf("scheme does not recognize kind %q in %s", kind, GroupVersion.String())
 		}
@@ -41,14 +41,14 @@ func TestSchemeRegistersSnapshotKinds(t *testing.T) {
 }
 
 // TestSnapshotDeepCopyIsIndependent verifies the generated deepcopy produces an
-// equal but independent Snapshot (mutating the clone must not touch the source).
+// equal but independent PodSnapshot (mutating the clone must not touch the source).
 func TestSnapshotDeepCopyIsIndependent(t *testing.T) {
-	original := &Snapshot{
+	original := &PodSnapshot{
 		ObjectMeta: metav1.ObjectMeta{Name: "snap-a", Namespace: "inference"},
-		Spec: SnapshotSpec{
-			Source: SnapshotSource{PodRef: PodReference{Name: "worker-0"}},
+		Spec: PodSnapshotSpec{
+			Source: PodSnapshotSource{PodRef: PodReference{Name: "worker-0"}},
 		},
-		Status: SnapshotStatus{
+		Status: PodSnapshotStatus{
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Captured"}},
 		},
 	}
@@ -69,18 +69,18 @@ func TestSnapshotDeepCopyIsIndependent(t *testing.T) {
 }
 
 // TestSnapshotContentDeepCopyIsIndependent verifies the generated deepcopy for
-// the cluster-scoped SnapshotContent is equal but independent.
+// the cluster-scoped PodSnapshotContent is equal but independent.
 func TestSnapshotContentDeepCopyIsIndependent(t *testing.T) {
-	original := &SnapshotContent{
+	original := &PodSnapshotContent{
 		ObjectMeta: metav1.ObjectMeta{Name: "content-a"},
-		Spec: SnapshotContentSpec{
-			SnapshotRef: SnapshotReference{Namespace: "inference", Name: "snap-a", UID: types.UID("uid-1")},
-			Source: SnapshotContentSource{
+		Spec: PodSnapshotContentSpec{
+			PodSnapshotRef: PodSnapshotReference{Namespace: "inference", Name: "snap-a", UID: types.UID("uid-1")},
+			Source: PodSnapshotContentSource{
 				PodRef:   PodReference{Name: "worker-0", UID: types.UID("pod-uid-1")},
 				NodeName: "node-a",
 			},
 		},
-		Status: SnapshotContentStatus{
+		Status: PodSnapshotContentStatus{
 			Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue, Reason: "Bound"}},
 		},
 	}

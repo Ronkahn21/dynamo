@@ -27,10 +27,10 @@ import (
 )
 
 func TestIgnoreIntermediateError(t *testing.T) {
-	gr := schema.GroupResource{Group: "nvidia.com", Resource: "snapshots"}
+	gr := schema.GroupResource{Group: "nvidia.com", Resource: "podsnapshots"}
 
 	terminal := map[string]error{
-		"invalid":    apierrors.NewInvalid(schema.GroupKind{Group: "nvidia.com", Kind: "Snapshot"}, "x", nil),
+		"invalid":    apierrors.NewInvalid(schema.GroupKind{Group: "nvidia.com", Kind: "PodSnapshot"}, "x", nil),
 		"badRequest": apierrors.NewBadRequest("bad"),
 		"forbidden":  apierrors.NewForbidden(gr, "x", errors.New("not owned")),
 	}
