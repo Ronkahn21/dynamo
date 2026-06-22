@@ -235,12 +235,12 @@ func (w *NodeController) Run(ctx context.Context) error {
 	if _, err := sourceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			if pod, ok := podFromInformerObj(obj); ok {
-				w.enqueueContentForSourcePod(ctx, pod)
+				w.reconcileSourcePod(ctx, pod)
 			}
 		},
 		UpdateFunc: func(_, newObj interface{}) {
 			if pod, ok := podFromInformerObj(newObj); ok {
-				w.enqueueContentForSourcePod(ctx, pod)
+				w.reconcileSourcePod(ctx, pod)
 			}
 		},
 	}); err != nil {
@@ -669,24 +669,6 @@ func chooseActiveContent(objs []interface{}) string {
 		return ""
 	}
 	return chosen.Name
-}
-
-// enqueueContentForSourcePod maps a source-pod event back to its SnapshotContent and re-drives the
-// capture reconcile, so pod status changes are caught without waiting for the content resync. The
-// content informer still independently reconciles every work order, so a non-chosen content is
-// never starved (worst case it is driven at the resync cadence).
-func (w *NodeController) enqueueContentForSourcePod(ctx context.Context, pod *corev1.Pod) {
-	if pod.Spec.NodeName != w.config.NodeName {
-		return
-	}
-	objs, err := w.contentIndexer.ByIndex(podRefIndex, pod.Namespace+"/"+pod.Name)
-	if err != nil {
-		w.log.Error(err, "Failed to look up SnapshotContent by source pod", "pod", fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
-		return
-	}
-	if name := chooseActiveContent(objs); name != "" {
-		w.reconcileSnapshotContent(ctx, name)
-	}
 }
 
 func (w *NodeController) checkpointLocationsFromPod(pod *corev1.Pod, checkpointID string, hostPID int) (checkpointLocations, error) {

@@ -71,19 +71,29 @@ func contentScheme(t *testing.T) *runtime.Scheme {
 	return s
 }
 
-// makeNodeController builds a NodeController wired to a fake typed client, runtime, and seam.
+// makeNodeController builds a NodeController wired to a fake typed client, runtime, and seam. Any
+// SnapshotContent in objs is also added to the podRef index (mirroring the content informer's
+// cache) so the pod-driven reconcileSourcePod can resolve it; tests that need a different index
+// state override w.contentIndexer after construction.
 func makeNodeController(t *testing.T, fc *fakeCheckpointer, objs ...client.Object) *NodeController {
 	t.Helper()
 	s := contentScheme(t)
+	idx := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{podRefIndex: podRefIndexFunc})
+	for _, o := range objs {
+		if sc, ok := o.(*nvidiacomv1alpha1.SnapshotContent); ok {
+			require.NoError(t, idx.Add(mustUnstructured(t, sc)))
+		}
+	}
 	w := &NodeController{
 		config:    &snapshottypes.AgentConfig{NodeName: "node-a", Storage: snapshottypes.StorageSpec{Type: "pvc", BasePath: t.TempDir()}},
 		clientset: k8sfake.NewClientset(),
 		client: crfake.NewClientBuilder().WithScheme(s).WithObjects(objs...).
 			WithStatusSubresource(&nvidiacomv1alpha1.SnapshotContent{}).Build(),
-		runtime:  &fakeRuntime{},
-		log:      logr.Discard(),
-		holderID: "snapshot-agent/test",
-		inFlight: make(map[string]struct{}),
+		runtime:        &fakeRuntime{},
+		log:            logr.Discard(),
+		holderID:       "snapshot-agent/test",
+		inFlight:       make(map[string]struct{}),
+		contentIndexer: idx,
 	}
 	w.checkpointFn = fc.fn
 	return w
@@ -288,13 +298,44 @@ func TestReconcileSnapshotContent_PodMountResolvesContainerPID(t *testing.T) {
 	assert.Equal(t, "ContainerChanged", cond.Reason)
 }
 
-func TestReconcileSnapshotContent_PodNotFoundNoOp(t *testing.T) {
+func TestReconcileSnapshotContent_PodNotFoundFails(t *testing.T) {
 	content := makeWorkOrder("snapshotcontent-x", "node-a", "x")
 	w := makeNodeController(t, &fakeCheckpointer{}, content) // no pod
 
 	w.reconcileSnapshotContent(context.Background(), content.Name)
 	got := getContent(t, w, content.Name)
-	assert.Empty(t, got.Status.Conditions)
+	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
+	require.NotNil(t, cond)
+	assert.Equal(t, "SourcePodNotFound", cond.Reason)
+}
+
+func TestClassifySourcePod(t *testing.T) {
+	content := makeWorkOrder("snapshotcontent-x", "node-a", "x") // PodRef Name worker-0, UID pod-uid
+	running := func(uid string, phase corev1.PodPhase, deleting bool) *corev1.Pod {
+		p := &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Namespace: "inference", UID: types.UID(uid)},
+			Status:     corev1.PodStatus{Phase: phase},
+		}
+		if deleting {
+			now := metav1.Now()
+			p.DeletionTimestamp = &now
+		}
+		return p
+	}
+
+	reason, _ := classifySourcePod(content, running("pod-uid", corev1.PodRunning, false))
+	assert.Equal(t, "", reason)
+
+	reason, _ = classifySourcePod(content, running("other-uid", corev1.PodRunning, false))
+	assert.Equal(t, "StalePodReference", reason)
+
+	for _, phase := range []corev1.PodPhase{corev1.PodFailed, corev1.PodSucceeded} {
+		reason, _ = classifySourcePod(content, running("pod-uid", phase, false))
+		assert.Equal(t, "SourcePodGone", reason)
+	}
+
+	reason, _ = classifySourcePod(content, running("pod-uid", corev1.PodRunning, true))
+	assert.Equal(t, "SourcePodGone", reason)
 }
 
 func TestReconcileSnapshotContent_StalePodUIDFails(t *testing.T) {
@@ -515,7 +556,7 @@ func seedIndex(t *testing.T, contents ...*nvidiacomv1alpha1.SnapshotContent) cac
 	return idx
 }
 
-func TestEnqueueContentForSourcePod_TriggersUnstick(t *testing.T) {
+func TestReconcileSourcePod_TriggersUnstick(t *testing.T) {
 	content := makeWorkOrder("snapshotcontent-abc", "node-a", "abc")
 	content.CreationTimestamp = metav1.Unix(1000, 0)
 	pod := podWithFailedSibling()
@@ -523,9 +564,8 @@ func TestEnqueueContentForSourcePod_TriggersUnstick(t *testing.T) {
 	rt := &fakeRuntime{}
 	w := makeNodeController(t, fc, content, pod)
 	w.runtime = rt
-	w.contentIndexer = seedIndex(t, content)
 
-	w.enqueueContentForSourcePod(context.Background(), pod)
+	w.reconcileSourcePod(context.Background(), pod)
 
 	got := getContent(t, w, content.Name)
 	cond := meta.FindStatusCondition(got.Status.Conditions, nvidiacomv1alpha1.SnapshotConditionFailed)
@@ -535,34 +575,33 @@ func TestEnqueueContentForSourcePod_TriggersUnstick(t *testing.T) {
 	assert.False(t, fc.wasCalled())
 }
 
-func TestEnqueueContentForSourcePod_PodNotIndexedNoOp(t *testing.T) {
+func TestReconcileSourcePod_PodNotIndexedNoOp(t *testing.T) {
 	content := makeWorkOrder("snapshotcontent-abc", "node-a", "abc")
 	pod := podWithFailedSibling()
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	w.contentIndexer = seedIndex(t) // empty index
+	w.contentIndexer = seedIndex(t) // override: empty index
 
-	w.enqueueContentForSourcePod(context.Background(), pod)
+	w.reconcileSourcePod(context.Background(), pod)
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
-func TestEnqueueContentForSourcePod_OtherNodeNoOp(t *testing.T) {
+func TestReconcileSourcePod_OtherNodeNoOp(t *testing.T) {
 	content := makeWorkOrder("snapshotcontent-abc", "node-a", "abc")
 	pod := podWithFailedSibling()
 	pod.Spec.NodeName = "node-b"
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	w.contentIndexer = seedIndex(t, content)
 
-	w.enqueueContentForSourcePod(context.Background(), pod)
+	w.reconcileSourcePod(context.Background(), pod)
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
 
-func TestEnqueueContentForSourcePod_IndexErrorNoOp(t *testing.T) {
+func TestReconcileSourcePod_IndexErrorNoOp(t *testing.T) {
 	content := makeWorkOrder("snapshotcontent-abc", "node-a", "abc")
 	pod := podWithFailedSibling()
 	w := makeNodeController(t, &fakeCheckpointer{}, content, pod)
-	// Indexer without podRefIndex registered → ByIndex returns an error; enqueue must log and no-op.
+	// Indexer without podRefIndex registered → ByIndex returns an error; reconcile must log and no-op.
 	w.contentIndexer = cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 
-	w.enqueueContentForSourcePod(context.Background(), pod)
+	w.reconcileSourcePod(context.Background(), pod)
 	assert.Empty(t, getContent(t, w, content.Name).Status.Conditions)
 }
