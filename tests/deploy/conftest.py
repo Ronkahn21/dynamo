@@ -71,12 +71,6 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default="snapshot-pvc",
         help="PVC name for checkpoint storage (default: snapshot-pvc).",
     )
-    parser.addoption(
-        "--snapshotctl-checkpoint-id",
-        type=str,
-        default=None,
-        help="Checkpoint ID to restore in test_snapshotctl_restore (required for that test).",
-    )
 
 
 @dataclass(frozen=True)
@@ -323,15 +317,6 @@ def snapshot_agent_image(request: pytest.FixtureRequest) -> str:
 def checkpoint_pvc(request: pytest.FixtureRequest) -> str:
     """PVC name for checkpoint storage."""
     return request.config.getoption("--checkpoint-pvc")
-
-
-@pytest.fixture
-def snapshotctl_checkpoint_id(request: pytest.FixtureRequest) -> str:
-    """Checkpoint ID to restore in test_snapshotctl_restore."""
-    val = request.config.getoption("--snapshotctl-checkpoint-id")
-    if not val:
-        pytest.skip("--snapshotctl-checkpoint-id not provided; skipping snapshotctl restore e2e test")
-    return val
 
 
 @pytest.fixture
