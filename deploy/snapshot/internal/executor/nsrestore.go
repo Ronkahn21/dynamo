@@ -21,6 +21,11 @@ type RestoreOptions struct {
 	CUDADeviceMap  string
 	CgroupRoot     string
 	TargetPodIP    string
+	// CheckpointFD, when >= 0, is an inherited fd of a detached checkpoint mount
+	// (agentInject mode). nsrestore grafts it at CheckpointPath inside this
+	// container's mount namespace before reading the checkpoint. -1 means the
+	// checkpoint is already visible (agentMount/podMount).
+	CheckpointFD int
 }
 
 type RestoreInNamespaceResult struct {
@@ -38,7 +43,19 @@ func RestoreInNamespace(ctx context.Context, opts RestoreOptions, log logr.Logge
 		"has_cuda_map", opts.CUDADeviceMap != "",
 		"cgroup_root", opts.CgroupRoot,
 		"target_pod_ip_present", opts.TargetPodIP != "",
+		"checkpoint_fd", opts.CheckpointFD,
 	)
+
+	// agentInject: graft the agent-supplied detached checkpoint mount into this
+	// container's mount namespace at CheckpointPath before anything reads it. This
+	// must precede ReadManifest/ApplyRootfsDiff, which both read the checkpoint dir.
+	if opts.CheckpointFD >= 0 {
+		detach, err := snapshotruntime.AttachCheckpointTree(opts.CheckpointFD, opts.CheckpointPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to graft checkpoint mount: %w", err)
+		}
+		defer detach()
+	}
 
 	manifestReadStart := time.Now()
 	m, err := types.ReadManifest(opts.CheckpointPath)
